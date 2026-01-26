@@ -1,0 +1,29 @@
+{
+  "name": "wb-analytics-dashboard",
+  "version": "1.0.0",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "db:reset": "docker-compose down -v && docker-compose up -d mysql"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.6",
+    "dayjs": "^1.11.19",
+    "hono": "^4.11.5",
+    "mysql2": "^3.16.1",
+    "xlsx": "^0.18.5",
+    "zod": "^4.3.6"
+  }
+}
