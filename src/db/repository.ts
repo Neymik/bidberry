@@ -29,10 +29,10 @@ export async function upsertCampaign(campaign: WBCampaign): Promise<void> {
 
   await execute(sql, [
     campaign.advertId,
-    campaign.name,
+    campaign.name ?? null,
     getCampaignTypeName(campaign.type),
     getCampaignStatusName(campaign.status),
-    campaign.dailyBudget,
+    campaign.dailyBudget ?? null,
     campaign.startTime ? new Date(campaign.startTime) : null,
     campaign.endTime ? new Date(campaign.endTime) : null,
   ]);
@@ -82,16 +82,16 @@ export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void>
   await execute(sql, [
     stats.advertId,
     new Date(stats.date),
-    stats.views,
-    stats.clicks,
-    stats.ctr,
-    stats.cpc,
-    stats.spend,
-    stats.orders,
-    stats.ordersSumRub,
-    stats.atbs,
-    stats.shks,
-    stats.sumPrice,
+    stats.views ?? 0,
+    stats.clicks ?? 0,
+    stats.ctr ?? 0,
+    stats.cpc ?? 0,
+    stats.spend ?? 0,
+    stats.orders ?? 0,
+    stats.ordersSumRub ?? 0,
+    stats.atbs ?? 0,
+    stats.shks ?? 0,
+    stats.sumPrice ?? 0,
   ]);
 }
 
@@ -226,14 +226,14 @@ export async function upsertProductAnalytics(
   await execute(sql, [
     analytics.nmID,
     date,
-    stats.openCardCount,
-    stats.addToCartCount,
-    stats.ordersCount,
-    stats.ordersSumRub,
-    stats.buyoutsCount,
-    stats.buyoutsSumRub,
-    stats.cancelCount,
-    stats.cancelSumRub,
+    stats.openCardCount ?? 0,
+    stats.addToCartCount ?? 0,
+    stats.ordersCount ?? 0,
+    stats.ordersSumRub ?? 0,
+    stats.buyoutsCount ?? 0,
+    stats.buyoutsSumRub ?? 0,
+    stats.cancelCount ?? 0,
+    stats.cancelSumRub ?? 0,
     conversionToCart,
     conversionToOrder,
   ]);
@@ -274,7 +274,7 @@ export async function saveBids(
   for (const bid of bids) {
     await execute(
       'INSERT INTO bids (campaign_id, keyword, bid, position, cpm) VALUES (?, ?, ?, ?, ?)',
-      [campaignId, bid.keyword, bid.bid, bid.position, bid.cpm]
+      [campaignId, bid.keyword ?? null, bid.bid ?? 0, bid.position ?? 0, bid.cpm ?? 0]
     );
     count++;
   }
@@ -407,13 +407,13 @@ function getCampaignTypeName(type: number): string {
 }
 
 function getCampaignStatusName(status: number): string {
-  const statuses: Record<number, string> = {
-    -1: 'Удалена',
-    4: 'Готова к запуску',
-    7: 'Завершена',
-    8: 'Отказано',
-    9: 'Активна',
-    11: 'Приостановлена',
-  };
-  return statuses[status] || `Статус ${status}`;
+  const statuses = new Map<number, string>([
+    [-1, 'Удалена'],
+    [4, 'Готова к запуску'],
+    [7, 'Завершена'],
+    [8, 'Отказано'],
+    [9, 'Активна'],
+    [11, 'Приостановлена'],
+  ]);
+  return statuses.get(status) || `Статус ${status}`;
 }

@@ -13,7 +13,10 @@
     "db:reset": "docker-compose down -v && docker-compose up -d mysql"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -22,7 +25,11 @@
     "@hono/zod-validator": "^0.7.6",
     "dayjs": "^1.11.19",
     "hono": "^4.11.5",
+    "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.16.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.13.0",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   }

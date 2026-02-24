@@ -4,11 +4,14 @@ import type {
   WBBid,
   WBProductAnalytics,
   WBKeywordStat,
+  WBOrder,
+  WBStock,
 } from '../types';
 
 const WB_API_BASE = 'https://advert-api.wildberries.ru';
 const WB_ANALYTICS_BASE = 'https://seller-analytics-api.wildberries.ru';
 const WB_CONTENT_BASE = 'https://content-api.wildberries.ru';
+const WB_STATISTICS_BASE = 'https://statistics-api.wildberries.ru';
 
 export class WBApiClient {
   private apiKey: string;
@@ -33,6 +36,7 @@ export class WBApiClient {
         'Content-Type': 'application/json',
         ...options.headers,
       },
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!response.ok) {
@@ -47,11 +51,36 @@ export class WBApiClient {
 
   // Получить список рекламных кампаний
   async getCampaigns(): Promise<WBCampaign[]> {
-    const response = await this.request<{ adverts: WBCampaign[] }>(
+    const response = await this.request<{
+      adverts: {
+        type: number;
+        status: number;
+        count: number;
+        advert_list: { advertId: number; changeTime: string }[];
+      }[];
+    }>(
       WB_API_BASE,
       '/adv/v1/promotion/count'
     );
-    return response.adverts || [];
+
+    // Flatten grouped structure into flat campaign list
+    const campaigns: WBCampaign[] = [];
+    for (const group of response.adverts || []) {
+      for (const advert of group.advert_list || []) {
+        campaigns.push({
+          advertId: advert.advertId,
+          name: '',
+          type: group.type,
+          status: group.status,
+          dailyBudget: 0,
+          createTime: '',
+          changeTime: advert.changeTime,
+          startTime: '',
+          endTime: '',
+        });
+      }
+    }
+    return campaigns;
   }
 
   // Получить информацию о кампании
@@ -232,6 +261,51 @@ export class WBApiClient {
       `/adv/v1/search/recommendation?nmId=${nmId}`
     );
     return response.keywords || [];
+  }
+
+  // === ORDERS API (Statistics) ===
+
+  // Получить заказы (Marketplace Statistics API)
+  async getOrders(dateFrom: string): Promise<WBOrder[]> {
+    return this.request<WBOrder[]>(
+      WB_STATISTICS_BASE,
+      `/api/v1/supplier/orders?dateFrom=${encodeURIComponent(dateFrom)}`
+    );
+  }
+
+  // === STOCKS API (Statistics) ===
+
+  // Получить остатки на складах
+  async getStocks(dateFrom: string): Promise<WBStock[]> {
+    return this.request<WBStock[]>(
+      WB_STATISTICS_BASE,
+      `/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(dateFrom)}`
+    );
+  }
+
+  // === ANALYTICS API (Enhanced — with traffic sources) ===
+
+  // Получить детальную аналитику по товарам с источниками трафика
+  async getProductAnalyticsDetailed(
+    nmIds: number[],
+    dateFrom: string,
+    dateTo: string
+  ): Promise<any> {
+    return this.request<any>(
+      WB_ANALYTICS_BASE,
+      '/api/v2/nm-report/detail',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          nmIDs: nmIds,
+          period: {
+            begin: dateFrom,
+            end: dateTo,
+          },
+          page: 1,
+        }),
+      }
+    );
   }
 
   // === BUDGET API ===

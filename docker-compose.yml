@@ -11,7 +11,7 @@ services:
       MYSQL_USER: ${MYSQL_USER:-wb_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wb_password}
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -27,6 +27,9 @@ services:
       dockerfile: Dockerfile
     container_name: wb-analytics-app
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     depends_on:
       mysql:
         condition: service_healthy
@@ -37,8 +40,13 @@ services:
       - MYSQL_DATABASE=${MYSQL_DATABASE:-wb_analytics}
       - MYSQL_USER=${MYSQL_USER:-wb_user}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-wb_password}
+      - APP_PORT=3000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_BOT_NAME=${TELEGRAM_BOT_NAME}
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - JWT_ACCESS_TTL=${JWT_ACCESS_TTL:-24h}
     ports:
-      - "${APP_PORT:-3000}:3000"
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
     volumes:
       - ./exports:/app/exports
 

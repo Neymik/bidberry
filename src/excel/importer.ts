@@ -24,8 +24,8 @@ export async function importCampaignsFromExcel(
 
   try {
     const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
+    const sheetName = workbook.SheetNames[0]!;
+    const sheet = workbook.Sheets[sheetName]!;
     const data = XLSX.utils.sheet_to_json(sheet) as any[];
 
     for (let i = 0; i < data.length; i++) {
@@ -66,8 +66,8 @@ export async function importProductsFromExcel(
 
   try {
     const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
+    const sheetName = workbook.SheetNames[0]!;
+    const sheet = workbook.Sheets[sheetName]!;
     const data = XLSX.utils.sheet_to_json(sheet) as any[];
 
     for (let i = 0; i < data.length; i++) {
@@ -106,8 +106,8 @@ export interface BidImportRow {
 
 export async function parseBidsFromExcel(filePath: string): Promise<BidImportRow[]> {
   const workbook = XLSX.readFile(filePath);
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
+  const sheetName = workbook.SheetNames[0]!;
+  const sheet = workbook.Sheets[sheetName]!;
   const data = XLSX.utils.sheet_to_json(sheet) as any[];
 
   return data
@@ -130,8 +130,8 @@ export async function importFromExcel<T>(
 
   try {
     const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
+    const sheetName = workbook.SheetNames[0]!;
+    const sheet = workbook.Sheets[sheetName]!;
     const data = XLSX.utils.sheet_to_json(sheet) as any[];
 
     for (let i = 0; i < data.length; i++) {
