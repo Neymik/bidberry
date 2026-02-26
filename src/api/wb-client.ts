@@ -7,6 +7,7 @@ import type {
   WBOrder,
   WBStock,
 } from '../types';
+import { withRetry } from '../utils/retry';
 
 const WB_API_BASE = 'https://advert-api.wildberries.ru';
 const WB_ANALYTICS_BASE = 'https://seller-analytics-api.wildberries.ru';
@@ -29,22 +30,33 @@ export class WBApiClient {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        'Authorization': this.apiKey,
-        'Content-Type': 'application/json',
-        ...options.headers,
+    return withRetry(
+      async () => {
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            'Authorization': this.apiKey,
+            'Content-Type': 'application/json',
+            ...options.headers,
+          },
+          signal: AbortSignal.timeout(60000),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`WB API Error: ${response.status} - ${error}`);
+        }
+
+        return response.json();
       },
-      signal: AbortSignal.timeout(30000),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`WB API Error: ${response.status} - ${error}`);
-    }
-
-    return response.json();
+      {
+        onRetry: (error, attempt, delayMs) => {
+          console.warn(
+            `[WB API] Retry ${attempt}/3 for ${endpoint}: ${error.message}. Waiting ${delayMs}ms...`
+          );
+        },
+      }
+    );
   }
 
   // === ADVERTISING API ===
@@ -97,7 +109,7 @@ export class WBApiClient {
     dateFrom: string,
     dateTo: string
   ): Promise<WBCampaignStats[]> {
-    const response = await this.request<WBCampaignStats[]>(
+    const response = await this.request<any[]>(
       WB_API_BASE,
       '/adv/v2/fullstats',
       {
@@ -108,7 +120,46 @@ export class WBApiClient {
         }))),
       }
     );
-    return response || [];
+
+    // Flatten: each campaign response has days[] with per-day stats
+    const result: WBCampaignStats[] = [];
+    for (const campaign of response || []) {
+      const advertId = campaign.advertId;
+      if (!advertId) continue;
+
+      for (const day of campaign.days || []) {
+        if (!day.date) continue;
+        // Aggregate across all apps within the day
+        let views = 0, clicks = 0, spend = 0, atbs = 0, orders = 0, shks = 0, sumPrice = 0;
+        for (const app of day.apps || []) {
+          views += app.views ?? 0;
+          clicks += app.clicks ?? 0;
+          spend += app.sum ?? 0;
+          atbs += app.atbs ?? 0;
+          orders += app.orders ?? 0;
+          shks += app.shks ?? 0;
+          sumPrice += app.sum_price ?? 0;
+        }
+        const ctr = views > 0 ? (clicks / views) * 100 : 0;
+        const cpc = clicks > 0 ? spend / clicks : 0;
+
+        result.push({
+          advertId,
+          date: day.date.split('T')[0],
+          views,
+          clicks,
+          ctr: Math.round(ctr * 100) / 100,
+          cpc: Math.round(cpc * 100) / 100,
+          spend,
+          orders,
+          ordersSumRub: sumPrice,
+          atbs,
+          shks,
+          sumPrice,
+        });
+      }
+    }
+    return result;
   }
 
   // Получить ставки для кампании (Bidding)
@@ -148,54 +199,88 @@ export class WBApiClient {
     );
   }
 
-  // === ANALYTICS API ===
+  // === ANALYTICS API (v3 Sales Funnel) ===
 
-  // Получить аналитику по товарам
+  // Получить аналитику по товарам (v3 sales-funnel)
   async getProductAnalytics(
     nmIds: number[],
     dateFrom: string,
     dateTo: string
   ): Promise<WBProductAnalytics[]> {
-    const response = await this.request<{ data: { cards: WBProductAnalytics[] } }>(
+    const response = await this.request<{ data: { products: any[] } }>(
       WB_ANALYTICS_BASE,
-      '/api/v2/nm-report/detail',
+      '/api/analytics/v3/sales-funnel/products',
       {
         method: 'POST',
         body: JSON.stringify({
           nmIDs: nmIds,
-          period: {
-            begin: dateFrom,
-            end: dateTo,
-          },
+          selectedPeriod: { start: dateFrom, end: dateTo },
         }),
       }
     );
-    return response.data?.cards || [];
+
+    // Map v3 response to existing WBProductAnalytics interface
+    return (response.data?.products || []).map((item: any) => ({
+      nmID: item.product?.nmId,
+      vendorCode: item.product?.vendorCode || '',
+      brandName: item.product?.brandName || '',
+      tags: { subject: item.product?.subjectName || '' },
+      object: { name: item.product?.title || '' },
+      statistics: {
+        selectedPeriod: {
+          begin: dateFrom,
+          end: dateTo,
+          openCardCount: item.statistic?.selected?.openCount ?? 0,
+          addToCartCount: item.statistic?.selected?.cartCount ?? 0,
+          ordersCount: item.statistic?.selected?.orderCount ?? 0,
+          ordersSumRub: item.statistic?.selected?.orderSum ?? 0,
+          buyoutsCount: item.statistic?.selected?.buyoutCount ?? 0,
+          buyoutsSumRub: item.statistic?.selected?.buyoutSum ?? 0,
+          cancelCount: item.statistic?.selected?.cancelCount ?? 0,
+          cancelSumRub: item.statistic?.selected?.cancelSum ?? 0,
+        },
+        previousPeriod: {
+          begin: '',
+          end: '',
+          openCardCount: item.statistic?.past?.openCount ?? 0,
+          addToCartCount: item.statistic?.past?.cartCount ?? 0,
+          ordersCount: item.statistic?.past?.orderCount ?? 0,
+          ordersSumRub: item.statistic?.past?.orderSum ?? 0,
+          buyoutsCount: item.statistic?.past?.buyoutCount ?? 0,
+          buyoutsSumRub: item.statistic?.past?.buyoutSum ?? 0,
+          cancelCount: item.statistic?.past?.cancelCount ?? 0,
+          cancelSumRub: item.statistic?.past?.cancelSum ?? 0,
+        },
+      },
+      stocks: {
+        stocksMp: item.product?.stocks?.mp ?? 0,
+        stocksWb: item.product?.stocks?.wb ?? 0,
+      },
+    }));
   }
 
-  // Получить историю продаж
+  // Получить историю продаж (v3 sales-funnel grouped history)
   async getSalesHistory(
     dateFrom: string,
     dateTo: string
   ): Promise<any[]> {
     return this.request<any[]>(
       WB_ANALYTICS_BASE,
-      `/api/v1/analytics/nm-report/grouped?dateFrom=${dateFrom}&dateTo=${dateTo}`
-    );
-  }
-
-  // Получить отчёт по продажам
-  async getSalesReport(dateFrom: string, dateTo: string): Promise<any> {
-    return this.request<any>(
-      WB_ANALYTICS_BASE,
-      '/api/v1/analytics/sales-report',
+      '/api/analytics/v3/sales-funnel/grouped/history',
       {
         method: 'POST',
         body: JSON.stringify({
-          dateFrom,
-          dateTo,
+          selectedPeriod: { start: dateFrom, end: dateTo },
         }),
       }
+    );
+  }
+
+  // Получить отчёт по продажам (Statistics API — /api/v1/supplier/sales)
+  async getSalesReport(dateFrom: string, _dateTo: string): Promise<any> {
+    return this.request<any>(
+      WB_STATISTICS_BASE,
+      `/api/v1/supplier/sales?dateFrom=${encodeURIComponent(dateFrom)}`
     );
   }
 
@@ -283,9 +368,9 @@ export class WBApiClient {
     );
   }
 
-  // === ANALYTICS API (Enhanced — with traffic sources) ===
+  // === ANALYTICS API (Enhanced — with conversion data) ===
 
-  // Получить детальную аналитику по товарам с источниками трафика
+  // Получить детальную аналитику по товарам с конверсиями (v3 sales-funnel)
   async getProductAnalyticsDetailed(
     nmIds: number[],
     dateFrom: string,
@@ -293,16 +378,12 @@ export class WBApiClient {
   ): Promise<any> {
     return this.request<any>(
       WB_ANALYTICS_BASE,
-      '/api/v2/nm-report/detail',
+      '/api/analytics/v3/sales-funnel/products',
       {
         method: 'POST',
         body: JSON.stringify({
           nmIDs: nmIds,
-          period: {
-            begin: dateFrom,
-            end: dateTo,
-          },
-          page: 1,
+          selectedPeriod: { start: dateFrom, end: dateTo },
         }),
       }
     );

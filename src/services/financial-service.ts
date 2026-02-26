@@ -10,26 +10,32 @@ export async function syncSalesReport(dateFrom: string, dateTo: string): Promise
   let count = 0;
   if (Array.isArray(report)) {
     for (const item of report) {
-      // Ensure product exists
-      if (item.nm_id || item.nmId) {
-        const nmId = item.nm_id || item.nmId;
-        await repo.upsertProduct({ nmId });
-        await financialRepo.upsertSalesReport({
-          nm_id: nmId,
-          date: item.date || item.sale_dt || dateFrom,
-          quantity: item.quantity || item.shk_id ? 1 : 0,
-          revenue: item.retail_amount || item.revenue || 0,
-          returns_count: item.return_amount ? 1 : 0,
-          returns_sum: item.return_amount || 0,
-          wb_commission: item.commission_percent ? (item.retail_amount || 0) * item.commission_percent / 100 : (item.ppvz_kvw_prc_base || 0),
-          logistics_cost: item.delivery_rub || 0,
-          storage_cost: item.storage_fee || 0,
-          penalties: item.penalty || 0,
-          additional_charges: item.additional_payment || 0,
-          net_payment: item.ppvz_for_pay || item.net_payment || 0,
-        });
-        count++;
-      }
+      const nmId = item.nmId || item.nm_id;
+      if (!nmId) continue;
+
+      // /api/v1/supplier/sales: returns have negative totalPrice
+      const isReturn = item.saleID?.startsWith('R') || (item.totalPrice ?? 0) < 0;
+      const revenue = Math.abs(item.finishedPrice ?? item.retail_amount ?? 0);
+      const forPay = Math.abs(item.forPay ?? item.ppvz_for_pay ?? 0);
+
+      await repo.upsertProduct({ nmId });
+      await financialRepo.upsertSalesReport({
+        nm_id: nmId,
+        date: item.date || item.sale_dt || dateFrom,
+        quantity: isReturn ? 0 : 1,
+        revenue: isReturn ? 0 : revenue,
+        returns_count: isReturn ? 1 : 0,
+        returns_sum: isReturn ? revenue : 0,
+        wb_commission: item.commission_percent
+          ? revenue * item.commission_percent / 100
+          : (item.ppvz_kvw_prc_base ?? 0),
+        logistics_cost: item.delivery_rub ?? 0,
+        storage_cost: item.storage_fee ?? 0,
+        penalties: item.penalty ?? 0,
+        additional_charges: item.additional_payment ?? 0,
+        net_payment: isReturn ? -forPay : forPay,
+      });
+      count++;
     }
   }
 

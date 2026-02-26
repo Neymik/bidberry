@@ -104,3 +104,11 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Wildberries API Notes
+
+- WB API is known to be buggy: random 500s, timeouts, rate limits, inconsistent responses
+- Always use retry logic with exponential backoff when calling WB API
+- Batch WB API calls (max 20 nmIds per request) and add delays between batches
+- Sync endpoints should isolate errors per-item — one failure shouldn't stop the whole sync
+- CLI sync script: `docker exec wb-analytics-app bun run src/cli/sync.ts [command]`

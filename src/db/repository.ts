@@ -366,7 +366,7 @@ export async function createImportRecord(
 ): Promise<number> {
   const result = await execute(
     'INSERT INTO import_history (import_type, file_name, status) VALUES (?, ?, ?)',
-    [importType, fileName, 'pending']
+    [importType, fileName ?? null, 'pending']
   );
   return result.insertId;
 }
@@ -381,7 +381,7 @@ export async function updateImportRecord(
     `UPDATE import_history
      SET status = ?, records_count = ?, error_message = ?, completed_at = NOW()
      WHERE id = ?`,
-    [status, recordsCount, errorMessage, id]
+    [status, recordsCount ?? null, errorMessage ?? null, id]
   );
 }
 

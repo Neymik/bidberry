@@ -5,6 +5,11 @@ import * as scheduler from './services/scheduler';
 import * as keywordTracker from './services/keyword-tracker';
 import * as financialService from './services/financial-service';
 import * as smartBidder from './services/smart-bidder';
+import * as repo from './db/repository';
+import * as trafficRepo from './db/traffic-repository';
+import * as ordersService from './services/orders-service';
+import * as stockService from './services/stock-service';
+import { getWBClient } from './api/wb-client';
 import dayjs from 'dayjs';
 
 const api = new Hono();
@@ -33,6 +38,208 @@ scheduler.registerTask('smart-bidder', 30 * 60 * 1000, async () => {
   console.log('[Scheduler] Running smart bidder...');
   const result = await smartBidder.runAllRules();
   console.log(`[Scheduler] Bidder: ${result.campaigns} campaigns, ${result.adjusted} adjusted, ${result.errors} errors`);
+});
+
+scheduler.registerTask('campaigns-sync', 6 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing campaigns...');
+  const importId = await repo.createImportRecord('campaigns-sync');
+  try {
+    const wbClient = getWBClient();
+    const campaigns = await wbClient.getCampaigns();
+    const count = await repo.upsertCampaigns(campaigns);
+    await repo.updateImportRecord(importId, 'completed', count);
+    console.log(`[Scheduler] Campaigns synced: ${count}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Campaigns sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('campaign-stats-sync', 6 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing campaign stats...');
+  const importId = await repo.createImportRecord('campaign-stats-sync');
+  try {
+    const wbClient = getWBClient();
+    const campaigns = await repo.getCampaigns();
+    const campaignIds = campaigns.map(c => c.campaign_id);
+    if (campaignIds.length === 0) {
+      await repo.updateImportRecord(importId, 'completed', 0);
+      return;
+    }
+    const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = dayjs().format('YYYY-MM-DD');
+    const stats = await wbClient.getCampaignStats(campaignIds, dateFrom, dateTo);
+    const count = await repo.upsertCampaignStatsBatch(stats);
+    await repo.updateImportRecord(importId, 'completed', count);
+    console.log(`[Scheduler] Campaign stats synced: ${count}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Campaign stats sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('products-sync', 12 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing products...');
+  const importId = await repo.createImportRecord('products-sync');
+  try {
+    const wbClient = getWBClient();
+    let totalSynced = 0;
+    let errors = 0;
+    let cursor: string | undefined;
+    while (true) {
+      try {
+        const result = await wbClient.getProducts(100, cursor);
+        const cards = result.cards || [];
+        if (cards.length === 0) break;
+        for (const card of cards) {
+          await repo.upsertProduct({
+            nmId: card.nmID,
+            vendorCode: card.vendorCode,
+            brand: card.brand,
+            subject: card.subjectName || card.subject,
+            name: card.title || card.name,
+          });
+          totalSynced++;
+        }
+        if (!result.cursor || cards.length < 100) break;
+        cursor = JSON.stringify(result.cursor);
+        await Bun.sleep(500);
+      } catch (err: any) {
+        errors++;
+        console.error(`[Scheduler] Products page error: ${err.message}`);
+        break;
+      }
+    }
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced);
+    console.log(`[Scheduler] Products synced: ${totalSynced}, errors: ${errors}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Products sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('product-analytics-sync', 12 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing product analytics...');
+  const importId = await repo.createImportRecord('product-analytics-sync');
+  try {
+    const wbClient = getWBClient();
+    const products = await repo.getProducts();
+    if (products.length === 0) {
+      await repo.updateImportRecord(importId, 'completed', 0);
+      return;
+    }
+    const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = dayjs().format('YYYY-MM-DD');
+    let totalSynced = 0;
+    let errors = 0;
+    const batchSize = 20;
+    for (let i = 0; i < products.length; i += batchSize) {
+      const batch = products.slice(i, i + batchSize);
+      const nmIds = batch.map(p => p.nm_id);
+      try {
+        const analytics = await wbClient.getProductAnalytics(nmIds, dateFrom, dateTo);
+        for (const item of analytics) {
+          if (item.statistics?.selectedPeriod) {
+            await repo.upsertProductAnalytics(item, dateFrom);
+            totalSynced++;
+          }
+        }
+      } catch (err: any) {
+        errors++;
+        console.error(`[Scheduler] Product analytics batch ${Math.floor(i / batchSize) + 1} error: ${err.message}`);
+      }
+      if (i + batchSize < products.length) await Bun.sleep(500);
+    }
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced);
+    console.log(`[Scheduler] Product analytics synced: ${totalSynced}, errors: ${errors}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Product analytics sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('traffic-sources-sync', 12 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing traffic sources...');
+  const importId = await repo.createImportRecord('traffic-sources-sync');
+  try {
+    const wbClient = getWBClient();
+    const products = await repo.getProducts();
+    if (products.length === 0) {
+      await repo.updateImportRecord(importId, 'completed', 0);
+      return;
+    }
+    const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = dayjs().format('YYYY-MM-DD');
+    let totalSynced = 0;
+    let errors = 0;
+    const batchSize = 20;
+    for (let i = 0; i < products.length; i += batchSize) {
+      const batch = products.slice(i, i + batchSize);
+      const nmIds = batch.map(p => p.nm_id);
+      try {
+        const response = await wbClient.getProductAnalyticsDetailed(nmIds, dateFrom, dateTo);
+        const items = response?.data?.products || [];
+        for (const item of items) {
+          const nmId = item.product?.nmId;
+          const stats = item.statistic?.selected;
+          if (!nmId || !stats) continue;
+          await trafficRepo.upsertTrafficSource({
+            nm_id: nmId,
+            date: dateFrom,
+            source_name: 'total',
+            open_card_count: stats.openCount ?? 0,
+            add_to_cart_count: stats.cartCount ?? 0,
+            orders_count: stats.orderCount ?? 0,
+            orders_sum: stats.orderSum ?? 0,
+            buyouts_count: stats.buyoutCount ?? 0,
+            buyouts_sum: stats.buyoutSum ?? 0,
+            cancel_count: stats.cancelCount ?? 0,
+            cancel_sum: stats.cancelSum ?? 0,
+          });
+          totalSynced++;
+        }
+      } catch (err: any) {
+        errors++;
+        console.error(`[Scheduler] Traffic sources batch ${Math.floor(i / batchSize) + 1} error: ${err.message}`);
+      }
+      if (i + batchSize < products.length) await Bun.sleep(500);
+    }
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced);
+    console.log(`[Scheduler] Traffic sources synced: ${totalSynced}, errors: ${errors}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Traffic sources sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('orders-sync', 6 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing orders...');
+  const importId = await repo.createImportRecord('orders-sync');
+  try {
+    const dateFrom = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+    const count = await ordersService.syncOrders(dateFrom);
+    await repo.updateImportRecord(importId, 'completed', count);
+    console.log(`[Scheduler] Orders synced: ${count}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Orders sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('stocks-sync', 12 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing stocks...');
+  const importId = await repo.createImportRecord('stocks-sync');
+  try {
+    const count = await stockService.syncStocks();
+    await repo.updateImportRecord(importId, 'completed', count);
+    console.log(`[Scheduler] Stocks synced: ${count}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Stocks sync error: ${error.message}`);
+  }
 });
 
 // Start scheduler if not in test mode
