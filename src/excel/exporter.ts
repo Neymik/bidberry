@@ -314,11 +314,11 @@ function aggregateStats(stats: DBCampaignStats[]): {
 } {
   const totals = stats.reduce(
     (acc, s) => ({
-      views: acc.views + (s.views || 0),
-      clicks: acc.clicks + (s.clicks || 0),
-      spend: acc.spend + (s.spend || 0),
-      orders: acc.orders + (s.orders || 0),
-      orderSum: acc.orderSum + (s.order_sum || 0),
+      views: acc.views + Number(s.views || 0),
+      clicks: acc.clicks + Number(s.clicks || 0),
+      spend: acc.spend + Number(s.spend || 0),
+      orders: acc.orders + Number(s.orders || 0),
+      orderSum: acc.orderSum + Number(s.order_sum || 0),
     }),
     { views: 0, clicks: 0, spend: 0, orders: 0, orderSum: 0 }
   );
@@ -344,13 +344,13 @@ function aggregateProductAnalytics(analytics: DBProductAnalytics[]): {
 } {
   const totals = analytics.reduce(
     (acc, a) => ({
-      openCardCount: acc.openCardCount + (a.open_card_count || 0),
-      addToCartCount: acc.addToCartCount + (a.add_to_cart_count || 0),
-      ordersCount: acc.ordersCount + (a.orders_count || 0),
-      ordersSum: acc.ordersSum + (a.orders_sum || 0),
-      buyoutsCount: acc.buyoutsCount + (a.buyouts_count || 0),
-      buyoutsSum: acc.buyoutsSum + (a.buyouts_sum || 0),
-      cancelCount: acc.cancelCount + (a.cancel_count || 0),
+      openCardCount: acc.openCardCount + Number(a.open_card_count || 0),
+      addToCartCount: acc.addToCartCount + Number(a.add_to_cart_count || 0),
+      ordersCount: acc.ordersCount + Number(a.orders_count || 0),
+      ordersSum: acc.ordersSum + Number(a.orders_sum || 0),
+      buyoutsCount: acc.buyoutsCount + Number(a.buyouts_count || 0),
+      buyoutsSum: acc.buyoutsSum + Number(a.buyouts_sum || 0),
+      cancelCount: acc.cancelCount + Number(a.cancel_count || 0),
     }),
     {
       openCardCount: 0,
@@ -375,11 +375,11 @@ function aggregateProductAnalytics(analytics: DBProductAnalytics[]): {
 }
 
 function calculateSummary(dailySummary: DailySummary[]): Record<string, any> {
-  const totalViews = dailySummary.reduce((sum, d) => sum + d.total_views, 0);
-  const totalClicks = dailySummary.reduce((sum, d) => sum + d.total_clicks, 0);
-  const totalSpend = dailySummary.reduce((sum, d) => sum + d.total_spend, 0);
-  const totalOrders = dailySummary.reduce((sum, d) => sum + d.total_orders, 0);
-  const totalRevenue = dailySummary.reduce((sum, d) => sum + d.total_order_sum, 0);
+  const totalViews = dailySummary.reduce((sum, d) => sum + Number(d.total_views), 0);
+  const totalClicks = dailySummary.reduce((sum, d) => sum + Number(d.total_clicks), 0);
+  const totalSpend = dailySummary.reduce((sum, d) => sum + Number(d.total_spend), 0);
+  const totalOrders = dailySummary.reduce((sum, d) => sum + Number(d.total_orders), 0);
+  const totalRevenue = dailySummary.reduce((sum, d) => sum + Number(d.total_order_sum), 0);
 
   return {
     'Период': `${dailySummary[dailySummary.length - 1]?.date || ''} - ${dailySummary[0]?.date || ''}`,
@@ -398,11 +398,11 @@ function calculateSummary(dailySummary: DailySummary[]): Record<string, any> {
 }
 
 function addCalculationsSheet(wb: XLSX.WorkBook, dailySummary: DailySummary[]): void {
-  const totalSpend = dailySummary.reduce((sum, d) => sum + d.total_spend, 0);
-  const totalOrders = dailySummary.reduce((sum, d) => sum + d.total_orders, 0);
-  const totalRevenue = dailySummary.reduce((sum, d) => sum + d.total_order_sum, 0);
-  const totalViews = dailySummary.reduce((sum, d) => sum + d.total_views, 0);
-  const totalClicks = dailySummary.reduce((sum, d) => sum + d.total_clicks, 0);
+  const totalSpend = dailySummary.reduce((sum, d) => sum + Number(d.total_spend), 0);
+  const totalOrders = dailySummary.reduce((sum, d) => sum + Number(d.total_orders), 0);
+  const totalRevenue = dailySummary.reduce((sum, d) => sum + Number(d.total_order_sum), 0);
+  const totalViews = dailySummary.reduce((sum, d) => sum + Number(d.total_views), 0);
+  const totalClicks = dailySummary.reduce((sum, d) => sum + Number(d.total_clicks), 0);
 
   const calculations = [
     { 'Метрика': 'ROAS (Return on Ad Spend)', 'Формула': 'Выручка / Расход', 'Значение': totalSpend > 0 ? (totalRevenue / totalSpend).toFixed(2) : 'N/A' },
