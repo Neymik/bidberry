@@ -12,6 +12,8 @@ export default function AppHeader() {
   const [status, setStatus] = useState<string>('Проверка...');
   const [statusClass, setStatusClass] = useState('bg-gray-200');
   const [balance, setBalance] = useState<string>('');
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState('');
   const { showToast } = useToast();
   const { user, logout } = useAuth();
 
@@ -45,12 +47,44 @@ export default function AppHeader() {
   }
 
   async function syncAll() {
-    showToast('Синхронизация...');
-    try {
-      await api('/sync/campaigns', { method: 'POST' });
+    if (syncing) return;
+    setSyncing(true);
+
+    const now = new Date();
+    const dateFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const dateTo = now.toISOString().slice(0, 10);
+
+    const steps = [
+      { label: 'Кампании', fn: () => api('/sync/campaigns', { method: 'POST' }) },
+      { label: 'Товары', fn: () => api('/sync/products', { method: 'POST' }) },
+      { label: 'Статистика РК', fn: () => api('/sync/stats', { method: 'POST', body: JSON.stringify({ dateFrom, dateTo }) }) },
+      { label: 'Аналитика товаров', fn: () => api('/sync/product-analytics', { method: 'POST', body: JSON.stringify({ dateFrom, dateTo }) }) },
+      { label: 'Источники трафика', fn: () => api('/sync/traffic-sources', { method: 'POST', body: JSON.stringify({ dateFrom, dateTo }) }) },
+      { label: 'Заказы', fn: () => api('/sync/orders', { method: 'POST', body: JSON.stringify({ dateFrom }) }) },
+      { label: 'Остатки', fn: () => api('/sync/stocks', { method: 'POST' }) },
+      { label: 'Отчёт по продажам', fn: () => api('/sync/sales-report', { method: 'POST', body: JSON.stringify({ dateFrom, dateTo }) }) },
+    ];
+
+    let completed = 0;
+    let errors: string[] = [];
+
+    for (const step of steps) {
+      completed++;
+      setSyncProgress(`${step.label} (${completed}/${steps.length})`);
+      try {
+        await step.fn();
+      } catch (e: any) {
+        errors.push(`${step.label}: ${e.message}`);
+      }
+    }
+
+    setSyncing(false);
+    setSyncProgress('');
+
+    if (errors.length === 0) {
       showToast('Синхронизация завершена', 'success');
-    } catch (e: any) {
-      showToast('Ошибка: ' + e.message, 'error');
+    } else {
+      showToast(`Завершено с ошибками (${errors.length}): ${errors[0]}`, 'error');
     }
   }
 
@@ -63,8 +97,12 @@ export default function AppHeader() {
         </div>
         <div className="flex items-center space-x-4">
           <span className="text-sm text-gray-600">{balance}</span>
-          <button onClick={syncAll} className="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700">
-            Синхронизировать
+          <button
+            onClick={syncAll}
+            disabled={syncing}
+            className={`px-4 py-2 rounded-lg text-sm font-medium ${syncing ? 'bg-purple-400 cursor-wait' : 'bg-purple-600 hover:bg-purple-700'} text-white`}
+          >
+            {syncing ? `Синхронизация: ${syncProgress}` : 'Синхронизировать'}
           </button>
           {user && (
             <div className="flex items-center space-x-3 border-l pl-4 ml-2">

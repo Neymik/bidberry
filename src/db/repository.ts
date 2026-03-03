@@ -64,13 +64,14 @@ export async function getCampaignById(campaignId: number): Promise<DBCampaign | 
 export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void> {
   const sql = `
     INSERT INTO campaign_stats
-      (campaign_id, date, views, clicks, ctr, cpc, spend, orders, order_sum, atbs, shks, sum_price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (campaign_id, date, views, clicks, ctr, cpc, cpm, spend, orders, order_sum, atbs, shks, sum_price)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       views = VALUES(views),
       clicks = VALUES(clicks),
       ctr = VALUES(ctr),
       cpc = VALUES(cpc),
+      cpm = VALUES(cpm),
       spend = VALUES(spend),
       orders = VALUES(orders),
       order_sum = VALUES(order_sum),
@@ -86,6 +87,7 @@ export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void>
     stats.clicks ?? 0,
     stats.ctr ?? 0,
     stats.cpc ?? 0,
+    (stats as any).cpm ?? 0,
     stats.spend ?? 0,
     stats.orders ?? 0,
     stats.ordersSumRub ?? 0,
@@ -123,6 +125,23 @@ export async function getCampaignStats(
 
   sql += ' ORDER BY date DESC';
   return query<DBCampaignStats[]>(sql, params);
+}
+
+// === CAMPAIGN PRODUCTS ===
+
+export async function upsertCampaignProduct(campaignId: number, nmId: number): Promise<void> {
+  await execute(`
+    INSERT INTO campaign_products (campaign_id, nm_id)
+    VALUES (?, ?)
+    ON DUPLICATE KEY UPDATE synced_at = NOW()
+  `, [campaignId, nmId]);
+}
+
+export async function getCampaignProducts(campaignId: number): Promise<{ nm_id: number }[]> {
+  return query<{ nm_id: number }[]>(
+    'SELECT nm_id FROM campaign_products WHERE campaign_id = ?',
+    [campaignId]
+  );
 }
 
 // === PRODUCTS ===

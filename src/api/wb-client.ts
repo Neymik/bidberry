@@ -13,6 +13,8 @@ const WB_API_BASE = 'https://advert-api.wildberries.ru';
 const WB_ANALYTICS_BASE = 'https://seller-analytics-api.wildberries.ru';
 const WB_CONTENT_BASE = 'https://content-api.wildberries.ru';
 const WB_STATISTICS_BASE = 'https://statistics-api.wildberries.ru';
+const WB_PRICES_BASE = 'https://discounts-prices-api.wildberries.ru';
+const WB_CALENDAR_BASE = 'https://dp-calendar-api.wildberries.ru';
 
 export class WBApiClient {
   private apiKey: string;
@@ -95,12 +97,22 @@ export class WBApiClient {
     return campaigns;
   }
 
-  // Получить информацию о кампании
-  async getCampaignInfo(campaignId: number): Promise<WBCampaign> {
-    return this.request<WBCampaign>(
+  // Получить информацию о кампаниях (до 50 за раз)
+  async getCampaignInfo(campaignId: number): Promise<any> {
+    const response = await this.request<{ adverts: any[] }>(
       WB_API_BASE,
-      `/adv/v1/promotion/adverts?id=${campaignId}`
+      `/api/advert/v2/adverts?ids=${campaignId}`
     );
+    return response?.adverts?.[0] || {};
+  }
+
+  // Получить информацию о нескольких кампаниях (до 50 за раз)
+  async getCampaignsInfo(campaignIds: number[]): Promise<any[]> {
+    const response = await this.request<{ adverts: any[] }>(
+      WB_API_BASE,
+      `/api/advert/v2/adverts?ids=${campaignIds.join(',')}`
+    );
+    return response?.adverts || [];
   }
 
   // Получить статистику кампаний
@@ -131,17 +143,21 @@ export class WBApiClient {
         if (!day.date) continue;
         // Aggregate across all apps within the day
         let views = 0, clicks = 0, spend = 0, atbs = 0, orders = 0, shks = 0, sumPrice = 0;
+        let cpmWeightedSum = 0;
         for (const app of day.apps || []) {
-          views += app.views ?? 0;
+          const appViews = app.views ?? 0;
+          views += appViews;
           clicks += app.clicks ?? 0;
           spend += app.sum ?? 0;
           atbs += app.atbs ?? 0;
           orders += app.orders ?? 0;
           shks += app.shks ?? 0;
           sumPrice += app.sum_price ?? 0;
+          cpmWeightedSum += (app.cpm ?? 0) * appViews;
         }
         const ctr = views > 0 ? (clicks / views) * 100 : 0;
         const cpc = clicks > 0 ? spend / clicks : 0;
+        const cpm = views > 0 ? cpmWeightedSum / views : 0;
 
         result.push({
           advertId,
@@ -150,6 +166,7 @@ export class WBApiClient {
           clicks,
           ctr: Math.round(ctr * 100) / 100,
           cpc: Math.round(cpc * 100) / 100,
+          cpm: Math.round(cpm * 100) / 100,
           spend,
           orders,
           ordersSumRub: sumPrice,
@@ -420,6 +437,60 @@ export class WBApiClient {
         }),
       }
     );
+  }
+
+  // === PRICES API ===
+
+  // Получить цены и скидки на товары
+  async getPrices(limit = 1000, offset = 0): Promise<{
+    data: { listGoods: { nmID: number; price: number; discount: number; clubDiscount?: number }[] }
+  }> {
+    return this.request<any>(
+      WB_PRICES_BASE,
+      `/api/v2/list/goods/filter?limit=${limit}&offset=${offset}`
+    );
+  }
+
+  // === PROMOTIONS CALENDAR API ===
+
+  // Получить список акций
+  async getPromotions(startDateTime?: string, endDateTime?: string): Promise<any[]> {
+    const start = startDateTime || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+    const end = endDateTime || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+    const params = new URLSearchParams({
+      startDateTime: start,
+      endDateTime: end,
+      allPromo: 'true',
+    });
+    const response = await this.request<{ data: { promotions: any[] } }>(
+      WB_CALENDAR_BASE,
+      `/api/v1/calendar/promotions?${params}`
+    );
+    return response?.data?.promotions || [];
+  }
+
+  // Получить товары, участвующие в акции
+  async getPromotionNomenclatures(promoId: number, inAction = true): Promise<any[]> {
+    const params = new URLSearchParams({
+      promotionID: String(promoId),
+      inAction: String(inAction),
+    });
+    const response = await this.request<{ data: { nomenclatures: any[] } }>(
+      WB_CALENDAR_BASE,
+      `/api/v1/calendar/promotions/nomenclatures?${params}`
+    );
+    return response?.data?.nomenclatures || [];
+  }
+
+  // === SEARCH CLUSTER STATS ===
+
+  // Получить статистику по поисковым кластерам кампании
+  async getSearchClusterStats(advertId: number): Promise<any[]> {
+    const response = await this.request<any>(
+      WB_API_BASE,
+      `/adv/v0/normquery/stats?id=${advertId}`
+    );
+    return response?.stat || response || [];
   }
 
   // === UTILITY METHODS ===

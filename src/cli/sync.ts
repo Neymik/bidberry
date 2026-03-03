@@ -1,5 +1,6 @@
 import * as repo from '../db/repository';
 import * as trafficRepo from '../db/traffic-repository';
+import * as promosRepo from '../db/promotions-repository';
 import * as ordersService from '../services/orders-service';
 import * as stockService from '../services/stock-service';
 import * as financialService from '../services/financial-service';
@@ -205,6 +206,160 @@ async function syncTraffic(): Promise<SyncResult> {
   }
 }
 
+async function syncPrices(): Promise<SyncResult> {
+  log('Syncing prices...');
+  const importId = await repo.createImportRecord('prices-sync');
+  try {
+    const wbClient = getWBClient();
+    let totalSynced = 0;
+    let offset = 0;
+    const limit = 1000;
+
+    while (true) {
+      try {
+        const response = await wbClient.getPrices(limit, offset);
+        const goods = response?.data?.listGoods || [];
+        if (goods.length === 0) break;
+
+        for (const item of goods) {
+          const basePrice = item.sizes?.[0]?.price || item.price || 0;
+          const discountedPrice = item.sizes?.[0]?.discountedPrice || basePrice;
+          const discount = item.discount || (basePrice > 0 ? Math.round((1 - discountedPrice / basePrice) * 100) : 0);
+          await repo.upsertProduct({
+            nmId: item.nmID,
+            price: basePrice,
+            discount: discount,
+            finalPrice: discountedPrice,
+          });
+          totalSynced++;
+        }
+
+        if (goods.length < limit) break;
+        offset += limit;
+        await Bun.sleep(500);
+      } catch (err: any) {
+        logError(`prices page error: ${err.message}`);
+        break;
+      }
+    }
+
+    await repo.updateImportRecord(importId, 'completed', totalSynced);
+    log(`prices: ${totalSynced} synced`);
+    return { target: 'prices', synced: totalSynced, errors: 0, errorMessages: [] };
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    logError(`prices: error - ${error.message}`);
+    return { target: 'prices', synced: 0, errors: 1, errorMessages: [error.message] };
+  }
+}
+
+async function syncPromotions(): Promise<SyncResult> {
+  log('Syncing promotions...');
+  const importId = await repo.createImportRecord('promotions-sync');
+  try {
+    const wbClient = getWBClient();
+    const promotions = await wbClient.getPromotions();
+    let totalSynced = 0;
+    let errors = 0;
+    const errorMessages: string[] = [];
+
+    // Skip "auto" type promos — nomenclatures endpoint doesn't work for them
+    const eligiblePromos = promotions.filter((p: any) => p.type !== 'auto');
+    log(`Found ${promotions.length} promos (${eligiblePromos.length} eligible, ${promotions.length - eligiblePromos.length} auto-skipped)`);
+
+    for (const promo of eligiblePromos) {
+      try {
+        const nomenclatures = await wbClient.getPromotionNomenclatures(promo.id);
+        const participatingNmIds = new Set(nomenclatures.map((n: any) => n.nmID || n.nmId));
+
+        for (const nmId of participatingNmIds) {
+          await promosRepo.upsertPromoParticipation({
+            nm_id: nmId,
+            promo_id: promo.id,
+            promo_name: promo.name || '',
+            promo_type: promo.type || '',
+            start_date: promo.startDateTime || '',
+            end_date: promo.endDateTime || '',
+            is_participating: true,
+          });
+          totalSynced++;
+        }
+      } catch (err: any) {
+        // 422 = promo expired/not available for nomenclatures — not a real error
+        if (err.message?.includes('422')) {
+          log(`promo ${promo.id} skipped (422 - not available for nomenclature listing)`);
+        } else {
+          errors++;
+          errorMessages.push(`Promo ${promo.id}: ${err.message}`);
+          logError(`promo ${promo.id} error: ${err.message}`);
+        }
+      }
+
+      // Rate limit: 10 req / 6 sec
+      await Bun.sleep(600);
+    }
+
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced, errorMessages.join('; ') || undefined);
+    log(`promotions: ${totalSynced} synced, ${errors} errors`);
+    return { target: 'promotions', synced: totalSynced, errors, errorMessages };
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    logError(`promotions: error - ${error.message}`);
+    return { target: 'promotions', synced: 0, errors: 1, errorMessages: [error.message] };
+  }
+}
+
+async function syncCampaignProducts(): Promise<SyncResult> {
+  log('Syncing campaign products...');
+  const importId = await repo.createImportRecord('campaign-products-sync');
+  try {
+    const wbClient = getWBClient();
+    const campaigns = await repo.getCampaigns();
+    let totalSynced = 0;
+    let errors = 0;
+    const errorMessages: string[] = [];
+
+    // Process in batches of 50 (API limit)
+    const batchSize = 50;
+    for (let i = 0; i < campaigns.length; i += batchSize) {
+      const batch = campaigns.slice(i, i + batchSize);
+      const campaignIds = batch.map(c => c.campaign_id);
+      try {
+        const adverts = await wbClient.getCampaignsInfo(campaignIds);
+        for (const advert of adverts) {
+          const campId = advert.id || advert.advertId;
+          if (!campId) continue;
+          // Extract nm_ids from nm_settings array
+          const nmSettings = advert.nm_settings || advert.unitedParams?.flatMap((p: any) => p.nms || []) || [];
+          for (const nm of nmSettings) {
+            const nmId = nm.nm_id || nm.nmId || nm.nmID;
+            if (nmId) {
+              await repo.upsertCampaignProduct(campId, nmId);
+              totalSynced++;
+            }
+          }
+        }
+      } catch (err: any) {
+        errors++;
+        const batchNum = Math.floor(i / batchSize) + 1;
+        errorMessages.push(`Batch ${batchNum}: ${err.message}`);
+        logError(`campaign-products batch ${batchNum} error: ${err.message}`);
+      }
+      if (i + batchSize < campaigns.length) await Bun.sleep(300);
+    }
+
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced, errorMessages.join('; ') || undefined);
+    log(`campaign-products: ${totalSynced} synced, ${errors} errors`);
+    return { target: 'campaign-products', synced: totalSynced, errors, errorMessages };
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    logError(`campaign-products: error - ${error.message}`);
+    return { target: 'campaign-products', synced: 0, errors: 1, errorMessages: [error.message] };
+  }
+}
+
 async function syncOrders(): Promise<SyncResult> {
   log('Syncing orders...');
   const importId = await repo.createImportRecord('orders-sync');
@@ -324,6 +479,9 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
   stocks: syncStocks,
   stats: syncCampaignStats,
   sales: syncSales,
+  prices: syncPrices,
+  promotions: syncPromotions,
+  'campaign-products': syncCampaignProducts,
   status: showStatus,
   all: async () => {
     log('Starting full sync...');
@@ -331,12 +489,15 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
     const syncFns = [
       syncCampaigns,
       syncProducts,
+      syncPrices,
       syncAnalytics,
       syncTraffic,
       syncOrders,
       syncStocks,
       syncCampaignStats,
       syncSales,
+      syncPromotions,
+      syncCampaignProducts,
     ];
 
     for (const fn of syncFns) {
@@ -357,16 +518,19 @@ const USAGE = `
 Usage: bun run src/cli/sync.ts [command]
 
 Commands:
-  all            - Run all syncs sequentially
-  campaigns      - Sync campaigns only
-  products       - Sync products only
-  analytics      - Sync product analytics
-  traffic        - Sync traffic sources
-  orders         - Sync orders
-  stocks         - Sync stocks
-  stats          - Sync campaign stats
-  sales          - Sync sales report
-  status         - Show last sync status from import_history
+  all              - Run all syncs sequentially
+  campaigns        - Sync campaigns only
+  products         - Sync products only
+  prices           - Sync product prices
+  analytics        - Sync product analytics
+  traffic          - Sync traffic sources
+  orders           - Sync orders
+  stocks           - Sync stocks
+  stats            - Sync campaign stats
+  sales            - Sync sales report
+  promotions       - Sync promotion participation
+  campaign-products - Sync campaign→product links
+  status           - Show last sync status from import_history
 `;
 
 async function main() {

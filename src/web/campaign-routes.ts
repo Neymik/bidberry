@@ -83,6 +83,16 @@ app.post('/api/sync/stats', zValidator('json', z.object({
   }
 });
 
+app.get('/api/campaigns/:id/products', async (c) => {
+  const id = parseInt(c.req.param('id'));
+  try {
+    const products = await repo.getCampaignProducts(id);
+    return c.json(products);
+  } catch (error: any) {
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 app.post('/api/sync/bids/:campaignId', async (c) => {
   const campaignId = parseInt(c.req.param('campaignId'));
   try {

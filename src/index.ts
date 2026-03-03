@@ -7,6 +7,7 @@ import * as financialService from './services/financial-service';
 import * as smartBidder from './services/smart-bidder';
 import * as repo from './db/repository';
 import * as trafficRepo from './db/traffic-repository';
+import * as promosRepo from './db/promotions-repository';
 import * as ordersService from './services/orders-service';
 import * as stockService from './services/stock-service';
 import { getWBClient } from './api/wb-client';
@@ -212,6 +213,126 @@ scheduler.registerTask('traffic-sources-sync', 12 * 60 * 60 * 1000, async () => 
   } catch (error: any) {
     await repo.updateImportRecord(importId, 'error', 0, error.message);
     console.error(`[Scheduler] Traffic sources sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('prices-sync', 24 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing prices...');
+  const importId = await repo.createImportRecord('prices-sync');
+  try {
+    const wbClient = getWBClient();
+    let totalSynced = 0;
+    let offset = 0;
+    const limit = 1000;
+    while (true) {
+      const response = await wbClient.getPrices(limit, offset);
+      const goods = response?.data?.listGoods || [];
+      if (goods.length === 0) break;
+      for (const item of goods) {
+        const basePrice = item.sizes?.[0]?.price || item.price || 0;
+        const discountedPrice = item.sizes?.[0]?.discountedPrice || basePrice;
+        const discount = item.discount || (basePrice > 0 ? Math.round((1 - discountedPrice / basePrice) * 100) : 0);
+        await repo.upsertProduct({
+          nmId: item.nmID,
+          price: basePrice,
+          discount: discount,
+          finalPrice: discountedPrice,
+        });
+        totalSynced++;
+      }
+      if (goods.length < limit) break;
+      offset += limit;
+      await Bun.sleep(500);
+    }
+    await repo.updateImportRecord(importId, 'completed', totalSynced);
+    console.log(`[Scheduler] Prices synced: ${totalSynced}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Prices sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('promotions-sync', 24 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing promotions...');
+  const importId = await repo.createImportRecord('promotions-sync');
+  try {
+    const wbClient = getWBClient();
+    const promotions = await wbClient.getPromotions();
+    let totalSynced = 0;
+    let errors = 0;
+    const eligiblePromos = promotions.filter((p: any) => p.type !== 'auto');
+    for (const promo of eligiblePromos) {
+      try {
+        const nomenclatures = await wbClient.getPromotionNomenclatures(promo.id);
+        for (const nm of nomenclatures) {
+          const nmId = nm.nmID || nm.nmId;
+          if (!nmId) continue;
+          await promosRepo.upsertPromoParticipation({
+            nm_id: nmId,
+            promo_id: promo.id,
+            promo_name: promo.name || '',
+            promo_type: promo.type || '',
+            start_date: promo.startDateTime || '',
+            end_date: promo.endDateTime || '',
+            is_participating: true,
+          });
+          totalSynced++;
+        }
+      } catch (err: any) {
+        if (!err.message?.includes('422')) {
+          errors++;
+          console.error(`[Scheduler] Promo ${promo.id} error: ${err.message}`);
+        }
+      }
+      await Bun.sleep(600);
+    }
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced);
+    console.log(`[Scheduler] Promotions synced: ${totalSynced}, errors: ${errors}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Promotions sync error: ${error.message}`);
+  }
+});
+
+scheduler.registerTask('campaign-products-sync', 12 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing campaign products...');
+  const importId = await repo.createImportRecord('campaign-products-sync');
+  try {
+    const wbClient = getWBClient();
+    const campaigns = await repo.getCampaigns();
+    let totalSynced = 0;
+    let errors = 0;
+    const batchSize = 50;
+    for (let i = 0; i < campaigns.length; i += batchSize) {
+      const batch = campaigns.slice(i, i + batchSize);
+      const campaignIds = batch.map(c => c.campaign_id);
+      try {
+        const adverts = await wbClient.getCampaignsInfo(campaignIds);
+        for (const advert of adverts) {
+          const campId = advert.id || advert.advertId;
+          if (!campId) continue;
+          const nmSettings = advert.nm_settings || advert.unitedParams?.flatMap((p: any) => p.nms || []) || [];
+          for (const nm of nmSettings) {
+            const nmId = nm.nm_id || nm.nmId || nm.nmID;
+            if (nmId) {
+              await repo.upsertCampaignProduct(campId, nmId);
+              totalSynced++;
+            }
+          }
+        }
+      } catch (err: any) {
+        errors++;
+        console.error(`[Scheduler] Campaign products batch error: ${err.message}`);
+      }
+      if (i + batchSize < campaigns.length) await Bun.sleep(300);
+    }
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced);
+    console.log(`[Scheduler] Campaign products synced: ${totalSynced}, errors: ${errors}`);
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    console.error(`[Scheduler] Campaign products sync error: ${error.message}`);
   }
 });
 

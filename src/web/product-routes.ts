@@ -3,6 +3,7 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import * as repo from '../db/repository';
 import * as trafficRepo from '../db/traffic-repository';
+import * as promosRepo from '../db/promotions-repository';
 import { getWBClient } from '../api/wb-client';
 import dayjs from 'dayjs';
 
@@ -202,6 +203,103 @@ app.post('/api/sync/traffic-sources', async (c) => {
       }
 
       if (i + batchSize < products.length) await Bun.sleep(500);
+    }
+
+    const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
+    await repo.updateImportRecord(importId, status, totalSynced, errorMessages.join('; ') || undefined);
+    return c.json({ success: true, synced: totalSynced, errors, errorMessages });
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
+// Sync prices from WB Prices API
+app.post('/api/sync/prices', async (c) => {
+  const importId = await repo.createImportRecord('prices-sync');
+  try {
+    const wbClient = getWBClient();
+    let totalSynced = 0;
+    let offset = 0;
+    const limit = 1000;
+
+    while (true) {
+      const response = await wbClient.getPrices(limit, offset);
+      const goods = response?.data?.listGoods || [];
+      if (goods.length === 0) break;
+
+      for (const item of goods) {
+        const basePrice = item.sizes?.[0]?.price || item.price || 0;
+        const discountedPrice = item.sizes?.[0]?.discountedPrice || basePrice;
+        const discount = item.discount || (basePrice > 0 ? Math.round((1 - discountedPrice / basePrice) * 100) : 0);
+        await repo.upsertProduct({
+          nmId: item.nmID,
+          price: basePrice,
+          discount: discount,
+          finalPrice: discountedPrice,
+        });
+        totalSynced++;
+      }
+
+      if (goods.length < limit) break;
+      offset += limit;
+      await Bun.sleep(500);
+    }
+
+    await repo.updateImportRecord(importId, 'completed', totalSynced);
+    return c.json({ success: true, synced: totalSynced });
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
+// Get product promotions
+app.get('/api/products/:id/promotions', async (c) => {
+  const nmId = parseInt(c.req.param('id'));
+  try {
+    const promos = await promosRepo.getPromosByNmId(nmId);
+    return c.json(promos);
+  } catch (error: any) {
+    return c.json({ error: error.message }, 500);
+  }
+});
+
+// Sync promotions from WB Calendar API
+app.post('/api/sync/promotions', async (c) => {
+  const importId = await repo.createImportRecord('promotions-sync');
+  try {
+    const wbClient = getWBClient();
+    const promotions = await wbClient.getPromotions();
+    let totalSynced = 0;
+    let errors = 0;
+    const errorMessages: string[] = [];
+
+    const eligiblePromos = promotions.filter((p: any) => p.type !== 'auto');
+    for (const promo of eligiblePromos) {
+      try {
+        const nomenclatures = await wbClient.getPromotionNomenclatures(promo.id);
+        for (const nm of nomenclatures) {
+          const nmId = nm.nmID || nm.nmId;
+          if (!nmId) continue;
+          await promosRepo.upsertPromoParticipation({
+            nm_id: nmId,
+            promo_id: promo.id,
+            promo_name: promo.name || '',
+            promo_type: promo.type || '',
+            start_date: promo.startDateTime || '',
+            end_date: promo.endDateTime || '',
+            is_participating: true,
+          });
+          totalSynced++;
+        }
+      } catch (err: any) {
+        if (!err.message?.includes('422')) {
+          errors++;
+          errorMessages.push(`Promo ${promo.id}: ${err.message}`);
+        }
+      }
+      await Bun.sleep(600);
     }
 
     const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';

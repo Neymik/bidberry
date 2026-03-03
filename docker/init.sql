@@ -315,6 +315,78 @@ CREATE TABLE IF NOT EXISTS marketing_events (
     INDEX idx_event_type (event_type)
 );
 
+-- Участие в акциях
+CREATE TABLE IF NOT EXISTS promotion_participation (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nm_id BIGINT NOT NULL,
+    promo_id BIGINT NOT NULL,
+    promo_name VARCHAR(500),
+    promo_type VARCHAR(100),
+    start_date DATETIME,
+    end_date DATETIME,
+    is_participating BOOLEAN DEFAULT FALSE,
+    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_nm_promo (nm_id, promo_id),
+    INDEX idx_nm_id (nm_id),
+    INDEX idx_promo_id (promo_id)
+);
+
+-- Связь кампаний и товаров
+CREATE TABLE IF NOT EXISTS campaign_products (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    campaign_id BIGINT NOT NULL,
+    nm_id BIGINT NOT NULL,
+    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_campaign_nm (campaign_id, nm_id),
+    INDEX idx_campaign_id (campaign_id),
+    INDEX idx_nm_id (nm_id),
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+);
+
+-- Аналитика поисковых запросов (из Seller Analytics SEARCH_REPORT)
+CREATE TABLE IF NOT EXISTS search_query_analytics (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nm_id BIGINT NOT NULL,
+    keyword VARCHAR(500) NOT NULL,
+    date DATE NOT NULL,
+    avg_position DECIMAL(8,2) DEFAULT 0,
+    impressions INT DEFAULT 0,
+    ctr DECIMAL(10,4) DEFAULT 0,
+    card_visits INT DEFAULT 0,
+    cart_adds INT DEFAULT 0,
+    cart_conversion DECIMAL(10,4) DEFAULT 0,
+    orders_count INT DEFAULT 0,
+    order_conversion DECIMAL(10,4) DEFAULT 0,
+    visibility DECIMAL(10,4) DEFAULT 0,
+    current_price DECIMAL(15,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_nm_kw_date (nm_id, keyword(255), date),
+    INDEX idx_nm_id (nm_id),
+    INDEX idx_keyword (keyword(255)),
+    INDEX idx_date (date)
+);
+
+-- Статистика поисковых кластеров рекламных кампаний
+CREATE TABLE IF NOT EXISTS search_cluster_stats (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    campaign_id BIGINT NOT NULL,
+    cluster_name VARCHAR(500) NOT NULL,
+    date DATE NOT NULL,
+    views INT DEFAULT 0,
+    clicks INT DEFAULT 0,
+    ctr DECIMAL(10,4) DEFAULT 0,
+    cpc DECIMAL(15,2) DEFAULT 0,
+    cpm DECIMAL(15,2) DEFAULT 0,
+    cart_adds INT DEFAULT 0,
+    orders_count INT DEFAULT 0,
+    spend DECIMAL(15,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_campaign_cluster_date (campaign_id, cluster_name(255), date),
+    INDEX idx_campaign_id (campaign_id),
+    INDEX idx_date (date),
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(campaign_id) ON DELETE CASCADE
+);
+
 -- Таблица агрегированной статистики по дням
 CREATE VIEW daily_summary AS
 SELECT
