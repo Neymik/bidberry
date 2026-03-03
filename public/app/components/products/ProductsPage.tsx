@@ -126,7 +126,7 @@ export default function ProductsPage() {
                 <td className="p-3">{p.brand || '-'}</td>
                 <td className="p-3">{p.subject || '-'}</td>
                 <td className="p-3 text-right">{formatNumber(p.final_price)} р</td>
-                <td className="p-3 text-right">{p.rating ? p.rating.toFixed(1) : '-'}</td>
+                <td className="p-3 text-right">{p.rating ? Number(p.rating).toFixed(1) : '-'}</td>
               </tr>
             ))}
           </tbody>
@@ -163,8 +163,8 @@ export default function ProductsPage() {
                     <td className="p-2 text-right">{a.add_to_cart_count}</td>
                     <td className="p-2 text-right">{a.orders_count}</td>
                     <td className="p-2 text-right">{formatNumber(a.orders_sum)} р</td>
-                    <td className="p-2 text-right">{a.conversion_to_cart?.toFixed(1)}%</td>
-                    <td className="p-2 text-right">{a.conversion_to_order?.toFixed(1)}%</td>
+                    <td className="p-2 text-right">{a.conversion_to_cart != null ? Number(a.conversion_to_cart).toFixed(1) : '-'}%</td>
+                    <td className="p-2 text-right">{a.conversion_to_order != null ? Number(a.conversion_to_order).toFixed(1) : '-'}%</td>
                   </tr>
                 ))}
               </tbody>

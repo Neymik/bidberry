@@ -104,7 +104,7 @@ export default function DashboardPage() {
           { label: 'Расход', value: summary ? formatNumber(summary.totalSpend) + ' р' : '-', color: 'from-purple-500 to-purple-700' },
           { label: 'Заказы', value: summary ? formatNumber(summary.totalOrders) : '-', color: 'from-blue-500 to-blue-700' },
           { label: 'Выручка', value: summary ? formatNumber(summary.totalRevenue) + ' р' : '-', color: 'from-green-500 to-green-700' },
-          { label: 'ROAS', value: summary?.roas ? summary.roas.toFixed(2) : '-', color: 'from-orange-500 to-orange-700' },
+          { label: 'ROAS', value: summary?.roas ? Number(summary.roas).toFixed(2) : '-', color: 'from-orange-500 to-orange-700' },
         ].map((card, i) => (
           <div key={i} className={`bg-gradient-to-br ${card.color} text-white rounded-xl p-6`}>
             <p className="text-white/70 text-sm">{card.label}</p>
