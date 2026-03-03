@@ -10,7 +10,8 @@
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down",
     "docker:logs": "docker-compose logs -f",
-    "db:reset": "docker-compose down -v && docker-compose up -d mysql"
+    "db:reset": "docker-compose down -v && docker-compose up -d mysql",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",
