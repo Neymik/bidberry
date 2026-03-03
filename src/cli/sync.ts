@@ -4,6 +4,7 @@ import * as promosRepo from '../db/promotions-repository';
 import * as ordersService from '../services/orders-service';
 import * as stockService from '../services/stock-service';
 import * as financialService from '../services/financial-service';
+import * as searchService from '../services/search-analytics-service';
 import { getWBClient } from '../api/wb-client';
 import dayjs from 'dayjs';
 
@@ -159,6 +160,17 @@ async function syncTraffic(): Promise<SyncResult> {
     const errorMessages: string[] = [];
     const batchSize = 20;
 
+    // Known WB traffic source keys from the v3 API response
+    const SOURCE_KEYS: Record<string, string> = {
+      openByUrl: 'Прямая ссылка',
+      openBySearch: 'Поиск',
+      openByAdvert: 'Реклама',
+      openByRecommend: 'Рекомендации',
+      openByCategory: 'Каталог/Категория',
+      openByCart: 'Корзина',
+      openByOther: 'Прочее',
+    };
+
     for (let i = 0; i < products.length; i += batchSize) {
       const batch = products.slice(i, i + batchSize);
       const nmIds = batch.map(p => p.nm_id);
@@ -170,6 +182,8 @@ async function syncTraffic(): Promise<SyncResult> {
           const nmId = item.product?.nmId;
           const stats = item.statistic?.selected;
           if (!nmId || !stats) continue;
+
+          // Save total row
           await trafficRepo.upsertTrafficSource({
             nm_id: nmId,
             date: dateFrom,
@@ -184,6 +198,27 @@ async function syncTraffic(): Promise<SyncResult> {
             cancel_sum: stats.cancelSum ?? 0,
           });
           totalSynced++;
+
+          // Extract per-source breakdown if available
+          for (const [key, label] of Object.entries(SOURCE_KEYS)) {
+            const sourceViews = stats[key] ?? 0;
+            if (sourceViews > 0) {
+              await trafficRepo.upsertTrafficSource({
+                nm_id: nmId,
+                date: dateFrom,
+                source_name: label,
+                open_card_count: sourceViews,
+                add_to_cart_count: 0,
+                orders_count: 0,
+                orders_sum: 0,
+                buyouts_count: 0,
+                buyouts_sum: 0,
+                cancel_count: 0,
+                cancel_sum: 0,
+              });
+              totalSynced++;
+            }
+          }
         }
       } catch (err: any) {
         errors++;
@@ -434,6 +469,38 @@ async function syncSales(): Promise<SyncResult> {
   }
 }
 
+async function syncSearchQueries(): Promise<SyncResult> {
+  log('Syncing search queries...');
+  const importId = await repo.createImportRecord('search-queries-sync');
+  try {
+    const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = dayjs().format('YYYY-MM-DD');
+    const count = await searchService.syncSearchQueries(dateFrom, dateTo);
+    await repo.updateImportRecord(importId, 'completed', count);
+    log(`search-queries: ${count} synced, 0 errors`);
+    return { target: 'search-queries', synced: count, errors: 0, errorMessages: [] };
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    logError(`search-queries: error - ${error.message}`);
+    return { target: 'search-queries', synced: 0, errors: 1, errorMessages: [error.message] };
+  }
+}
+
+async function syncClusterStats(): Promise<SyncResult> {
+  log('Syncing search cluster stats...');
+  const importId = await repo.createImportRecord('cluster-stats-sync');
+  try {
+    const count = await searchService.syncSearchClusters();
+    await repo.updateImportRecord(importId, 'completed', count);
+    log(`cluster-stats: ${count} synced, 0 errors`);
+    return { target: 'cluster-stats', synced: count, errors: 0, errorMessages: [] };
+  } catch (error: any) {
+    await repo.updateImportRecord(importId, 'error', 0, error.message);
+    logError(`cluster-stats: error - ${error.message}`);
+    return { target: 'cluster-stats', synced: 0, errors: 1, errorMessages: [error.message] };
+  }
+}
+
 async function showStatus(): Promise<void> {
   const history = await repo.getImportHistory(20);
   if (history.length === 0) {
@@ -482,6 +549,8 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
   prices: syncPrices,
   promotions: syncPromotions,
   'campaign-products': syncCampaignProducts,
+  'search-queries': syncSearchQueries,
+  'cluster-stats': syncClusterStats,
   status: showStatus,
   all: async () => {
     log('Starting full sync...');
@@ -498,6 +567,8 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
       syncSales,
       syncPromotions,
       syncCampaignProducts,
+      syncSearchQueries,
+      syncClusterStats,
     ];
 
     for (const fn of syncFns) {
@@ -530,6 +601,8 @@ Commands:
   sales            - Sync sales report
   promotions       - Sync promotion participation
   campaign-products - Sync campaign→product links
+  search-queries   - Sync search query analytics
+  cluster-stats    - Sync search cluster stats for campaigns
   status           - Show last sync status from import_history
 `;
 

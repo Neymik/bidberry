@@ -64,7 +64,7 @@ export async function getOrders(
   nmId?: number,
   limit = 500
 ): Promise<DBOrder[]> {
-  let sql = 'SELECT * FROM orders WHERE 1=1';
+  let sql = 'SELECT *, DATEDIFF(date_updated, date_created) AS delivery_days FROM orders WHERE 1=1';
   const params: any[] = [];
 
   if (dateFrom) {

@@ -25,6 +25,7 @@
   "dependencies": {
     "@hono/zod-validator": "^0.7.6",
     "dayjs": "^1.11.19",
+    "fflate": "^0.8.2",
     "hono": "^4.11.5",
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.16.1",

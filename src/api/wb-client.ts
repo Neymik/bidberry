@@ -493,6 +493,55 @@ export class WBApiClient {
     return response?.stat || response || [];
   }
 
+  // === SEARCH REPORT (Seller Analytics) ===
+
+  // Получить поисковые тексты (запросы) по товарам
+  async getSearchTexts(
+    nmIds: number[],
+    dateFrom: string,
+    dateTo: string,
+    limit = 100
+  ): Promise<any> {
+    return this.request<any>(
+      WB_ANALYTICS_BASE,
+      '/api/v2/search-report/product/search-texts',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          nmIds,
+          period: { begin: dateFrom, end: dateTo },
+          limit,
+          topOrderBy: 'openCard',
+        }),
+      }
+    );
+  }
+
+  // Получить отчёт по поисковым запросам (сводный)
+  async getSearchReport(
+    dateFrom: string,
+    dateTo: string,
+    nmIds?: number[]
+  ): Promise<any> {
+    const body: any = {
+      periods: [{ begin: dateFrom, end: dateTo }],
+      sorting: { column: 'openCard', order: 'desc' },
+      limit: 100,
+      offset: 0,
+    };
+    if (nmIds && nmIds.length > 0) {
+      body.filters = { nmIds };
+    }
+    return this.request<any>(
+      WB_ANALYTICS_BASE,
+      '/api/v2/search-report/report',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    );
+  }
+
   // === UTILITY METHODS ===
 
   // Проверить подключение к API

@@ -172,6 +172,19 @@ const MOCK_KEYWORD_POSITIONS: DBKeywordPosition[] = [
   },
 ];
 
+const MOCK_SEARCH_QUERY_SUMMARY = [
+  {
+    nm_id: 100001, keyword: 'футболка мужская',
+    avg_position: 3.5, total_impressions: 5000, total_visits: 800,
+    total_cart_adds: 150, total_orders: 60, avg_ctr: 16.0, avg_visibility: 45.2,
+  },
+  {
+    nm_id: 100001, keyword: 'футболка хлопок',
+    avg_position: 8.2, total_impressions: 2000, total_visits: 300,
+    total_cart_adds: 50, total_orders: 20, avg_ctr: 15.0, avg_visibility: 22.1,
+  },
+];
+
 // ============================================================
 // MUTABLE MOCK DATA (can be swapped for empty-data tests)
 // ============================================================
@@ -189,6 +202,7 @@ const ORIGINAL_MOCK_DATA = {
   campaignStats: MOCK_CAMPAIGN_STATS,
   keywords: MOCK_KEYWORDS,
   keywordPositions: MOCK_KEYWORD_POSITIONS,
+  searchQuerySummary: MOCK_SEARCH_QUERY_SUMMARY,
 };
 
 let mockData = { ...ORIGINAL_MOCK_DATA };
@@ -248,6 +262,13 @@ mock.module('../db/events-repository', () => ({
     mockData.events.filter(e => e.nm_id === nmId)
   ),
   getAllEvents: mock(async () => mockData.events),
+}));
+
+mock.module('../db/search-repository', () => ({
+  getSearchQuerySummary: mock(async (nmId: number) =>
+    mockData.searchQuerySummary.filter(s => s.nm_id === nmId)
+  ),
+  getAllSearchQuerySummary: mock(async () => mockData.searchQuerySummary),
 }));
 
 mock.module('../db/keywords-repository', () => ({
@@ -338,6 +359,7 @@ describe('all-products report', () => {
     expect(headers).toContain('ID заказа');
     expect(headers).toContain('Статус');
     expect(headers).toContain('Отменён');
+    expect(headers).toContain('Дней доставки');
     expect(rows.length).toBe(3); // header + 2 orders
   });
 
@@ -381,10 +403,11 @@ describe('all-products report', () => {
     const headers = rows[0];
     expect(headers).toContain('Артикул');
     expect(headers).toContain('Ключевой запрос');
-    expect(headers).toContain('Частотность');
-    expect(headers).toContain('Текущая позиция');
-    expect(headers).toContain('Отслеживание');
-    expect(rows.length).toBe(3); // header + 2 keywords
+    expect(headers).toContain('Ср. позиция');
+    expect(headers).toContain('Показы');
+    expect(headers).toContain('CTR, %');
+    expect(headers).toContain('Видимость, %');
+    expect(rows.length).toBe(3); // header + 2 search queries
   });
 });
 
@@ -458,6 +481,7 @@ describe('empty data', () => {
       campaignStats: [],
       keywords: [],
       keywordPositions: [],
+      searchQuerySummary: [],
     };
 
     filePath = await generatePerechenReport('2025-06-01', '2025-06-30');
@@ -534,10 +558,11 @@ describe('calculated fields', () => {
     expect(row['ROAS']).toBe(4.5);
   });
 
-  test('Кластеры Отслеживание shows Да for tracked keywords', () => {
+  test('Кластеры shows search analytics data with impressions', () => {
     const data = getSheetData(workbook, 'Кластеры');
     for (const row of data) {
-      expect((row as any)['Отслеживание']).toBe('Да');
+      expect((row as any)['Показы']).toBeGreaterThan(0);
+      expect((row as any)['Ключевой запрос']).toBeTruthy();
     }
   });
 });

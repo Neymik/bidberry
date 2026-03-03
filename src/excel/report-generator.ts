@@ -6,6 +6,7 @@ import * as stockRepo from '../db/stock-repository';
 import * as trafficRepo from '../db/traffic-repository';
 import * as eventsRepo from '../db/events-repository';
 import * as keywordsRepo from '../db/keywords-repository';
+import * as searchRepo from '../db/search-repository';
 
 const EXPORTS_DIR = process.env.EXPORTS_DIR || './exports';
 
@@ -47,8 +48,8 @@ export async function generatePerechenReport(
   // Sheet 6: Рекламные компании (Ad Campaigns)
   await addCampaignsSheet(wb, dateFrom, dateTo);
 
-  // Sheet 7: Кластеры (Keywords/Clusters)
-  await addKeywordsSheet(wb, nmId);
+  // Sheet 7: Кластеры (Keywords/Clusters + Search Analytics)
+  await addKeywordsSheet(wb, dateFrom, dateTo, nmId);
 
   const suffix = nmId ? `_${nmId}` : '_all';
   const fileName = `perechen${suffix}_${dayjs().format('YYYY-MM-DD_HH-mm-ss')}.xlsx`;
@@ -137,6 +138,7 @@ async function addOrdersSheet(
     'К перечислению': o.finished_price,
     'Статус': o.status,
     'Отменён': o.is_cancel ? 'Да' : 'Нет',
+    'Дней доставки': (o as any).delivery_days ?? '',
   }));
 
   const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ 'ID заказа': 'Нет данных' }]);
@@ -145,6 +147,7 @@ async function addOrdersSheet(
     { wch: 20 }, { wch: 20 }, { wch: 10 }, { wch: 15 },
     { wch: 15 }, { wch: 15 }, { wch: 10 }, { wch: 10 },
     { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 10 },
+    { wch: 14 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Лента заказов');
 }
@@ -347,37 +350,63 @@ async function addCampaignsSheet(
   XLSX.utils.book_append_sheet(wb, ws, 'Рекламные компании');
 }
 
-// === Sheet 7: Кластеры ===
+// === Sheet 7: Кластеры (Keywords + Search Query Analytics) ===
 async function addKeywordsSheet(
   wb: XLSX.WorkBook,
+  dateFrom?: string,
+  dateTo?: string,
   nmId?: number
 ): Promise<void> {
-  const allKeywords = nmId
-    ? await keywordsRepo.getKeywords(nmId)
-    : await keywordsRepo.getAllTrackedKeywords();
+  // Try search_query_analytics first (richer data from Seller Analytics)
+  const searchData = nmId
+    ? await searchRepo.getSearchQuerySummary(nmId, dateFrom, dateTo)
+    : await searchRepo.getAllSearchQuerySummary(dateFrom, dateTo);
 
   const rows: any[] = [];
 
-  for (const kw of allKeywords) {
-    const positions = await keywordsRepo.getKeywordPositions(kw.nm_id, kw.keyword, 1);
-    const latestPosition = positions[0];
+  if (searchData.length > 0) {
+    // Use rich search analytics data
+    for (const s of searchData) {
+      rows.push({
+        'Артикул': s.nm_id,
+        'Ключевой запрос': s.keyword,
+        'Ср. позиция': s.avg_position ?? '-',
+        'Показы': Number(s.total_impressions) || 0,
+        'Переходы': Number(s.total_visits) || 0,
+        'CTR, %': s.avg_ctr ?? 0,
+        'В корзину': Number(s.total_cart_adds) || 0,
+        'Заказы': Number(s.total_orders) || 0,
+        'Видимость, %': s.avg_visibility ?? 0,
+      });
+    }
+  } else {
+    // Fallback to keyword_collections + keyword_positions (manual tracking)
+    const allKeywords = nmId
+      ? await keywordsRepo.getKeywords(nmId)
+      : await keywordsRepo.getAllTrackedKeywords();
 
-    rows.push({
-      'Артикул': kw.nm_id,
-      'Ключевой запрос': kw.keyword,
-      'Частотность': kw.frequency,
-      'Текущая позиция': latestPosition?.position || '-',
-      'Страница': latestPosition?.page || '-',
-      'Источник': kw.source,
-      'Отслеживание': kw.is_tracked ? 'Да' : 'Нет',
-      'Дата проверки': latestPosition?.checked_at ? dayjs(latestPosition.checked_at).format('YYYY-MM-DD HH:mm') : '',
-    });
+    for (const kw of allKeywords) {
+      const positions = await keywordsRepo.getKeywordPositions(kw.nm_id, kw.keyword, 1);
+      const latestPosition = positions[0];
+
+      rows.push({
+        'Артикул': kw.nm_id,
+        'Ключевой запрос': kw.keyword,
+        'Ср. позиция': latestPosition?.position || '-',
+        'Показы': kw.frequency || 0,
+        'Переходы': '-',
+        'CTR, %': '-',
+        'В корзину': '-',
+        'Заказы': '-',
+        'Видимость, %': '-',
+      });
+    }
   }
 
   const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ 'Артикул': 'Нет данных о ключевых словах' }]);
   ws['!cols'] = [
-    { wch: 12 }, { wch: 35 }, { wch: 12 }, { wch: 15 },
-    { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 18 },
+    { wch: 12 }, { wch: 35 }, { wch: 12 }, { wch: 10 },
+    { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Кластеры');
 }
