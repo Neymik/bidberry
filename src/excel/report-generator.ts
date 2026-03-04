@@ -26,6 +26,7 @@ async function ensureExportsDir(): Promise<void> {
  * Can generate for a specific product (nmId) or all products (nmId = undefined).
  */
 export async function generatePerechenReport(
+  cabinetId: number,
   dateFrom: string,
   dateTo: string,
   nmId?: number
@@ -35,25 +36,25 @@ export async function generatePerechenReport(
   const wb = XLSX.utils.book_new();
 
   // Sheet 1: Воронка (Product Funnel)
-  await addFunnelSheet(wb, dateFrom, dateTo, nmId);
+  await addFunnelSheet(wb, cabinetId, dateFrom, dateTo, nmId);
 
   // Sheet 2: Лента заказов (Orders Feed)
-  await addOrdersSheet(wb, dateFrom, dateTo, nmId);
+  await addOrdersSheet(wb, cabinetId, dateFrom, dateTo, nmId);
 
   // Sheet 3: Остатки (Stock/Inventory)
-  await addStocksSheet(wb, nmId);
+  await addStocksSheet(wb, cabinetId, nmId);
 
   // Sheet 4: Воронка по точкам входа (Traffic Sources)
-  await addTrafficSourcesSheet(wb, dateFrom, dateTo, nmId);
+  await addTrafficSourcesSheet(wb, cabinetId, dateFrom, dateTo, nmId);
 
   // Sheet 5: Маркетинговая активность (Marketing Events)
-  await addMarketingEventsSheet(wb, dateFrom, dateTo, nmId);
+  await addMarketingEventsSheet(wb, cabinetId, dateFrom, dateTo, nmId);
 
   // Sheet 6: Рекламные компании (Ad Campaigns)
-  await addCampaignsSheet(wb, dateFrom, dateTo);
+  await addCampaignsSheet(wb, cabinetId, dateFrom, dateTo);
 
   // Sheet 7: Кластеры (Keywords/Clusters + Search Analytics)
-  await addKeywordsSheet(wb, dateFrom, dateTo, nmId);
+  await addKeywordsSheet(wb, cabinetId, dateFrom, dateTo, nmId);
 
   const suffix = nmId ? `_${nmId}` : '_all';
   const fileName = `perechen${suffix}_${dayjs().format('YYYY-MM-DD_HH-mm-ss')}.xlsx`;
@@ -67,6 +68,7 @@ export async function generatePerechenReport(
  * Generate a single-section report from the Перечень template.
  */
 export async function generateSectionReport(
+  cabinetId: number,
   section: SectionType,
   dateFrom: string,
   dateTo: string,
@@ -80,13 +82,13 @@ export async function generateSectionReport(
   const wb = XLSX.utils.book_new();
 
   const sectionMap: Record<SectionType, () => Promise<void>> = {
-    voronka: () => addFunnelSheet(wb, dateFrom, dateTo, nmId),
-    orders: () => addOrdersSheet(wb, dateFrom, dateTo, nmId),
-    stocks: () => addStocksSheet(wb, nmId),
-    traffic: () => addTrafficSourcesSheet(wb, dateFrom, dateTo, nmId),
-    marketing: () => addMarketingEventsSheet(wb, dateFrom, dateTo, nmId),
-    campaigns: () => addCampaignsSheet(wb, dateFrom, dateTo),
-    clusters: () => addKeywordsSheet(wb, dateFrom, dateTo, nmId),
+    voronka: () => addFunnelSheet(wb, cabinetId, dateFrom, dateTo, nmId),
+    orders: () => addOrdersSheet(wb, cabinetId, dateFrom, dateTo, nmId),
+    stocks: () => addStocksSheet(wb, cabinetId, nmId),
+    traffic: () => addTrafficSourcesSheet(wb, cabinetId, dateFrom, dateTo, nmId),
+    marketing: () => addMarketingEventsSheet(wb, cabinetId, dateFrom, dateTo, nmId),
+    campaigns: () => addCampaignsSheet(wb, cabinetId, dateFrom, dateTo),
+    clusters: () => addKeywordsSheet(wb, cabinetId, dateFrom, dateTo, nmId),
   };
 
   await sectionMap[section]();
@@ -102,18 +104,19 @@ export async function generateSectionReport(
 // === Sheet 1: Воронка ===
 async function addFunnelSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom: string,
   dateTo: string,
   nmId?: number
 ): Promise<void> {
   const products = nmId
-    ? [await repo.getProductById(nmId)].filter(Boolean) as any[]
-    : await repo.getProducts();
+    ? [await repo.getProductById(cabinetId, nmId)].filter(Boolean) as any[]
+    : await repo.getProducts(cabinetId);
 
   const rows: any[] = [];
 
   for (const product of products) {
-    const analytics = await repo.getProductAnalytics(product.nm_id, dateFrom, dateTo);
+    const analytics = await repo.getProductAnalytics(cabinetId, product.nm_id, dateFrom, dateTo);
 
     for (const day of analytics) {
       const buyoutPct = day.orders_count > 0
@@ -154,11 +157,12 @@ async function addFunnelSheet(
 // === Sheet 2: Лента заказов ===
 async function addOrdersSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom: string,
   dateTo: string,
   nmId?: number
 ): Promise<void> {
-  const orders = await ordersRepo.getOrders(dateFrom, dateTo, nmId, 5000);
+  const orders = await ordersRepo.getOrders(cabinetId, dateFrom, dateTo, nmId, 5000);
 
   const rows = orders.map(o => ({
     'ID заказа': o.order_id,
@@ -195,12 +199,13 @@ async function addOrdersSheet(
 // === Sheet 3: Остатки ===
 async function addStocksSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   nmId?: number
 ): Promise<void> {
   let rows: any[] = [];
 
   if (nmId) {
-    const stocks = await stockRepo.getStocksByNmId(nmId);
+    const stocks = await stockRepo.getStocksByNmId(cabinetId, nmId);
     rows = stocks.map(s => ({
       'Артикул': s.nm_id,
       'Артикул продавца': s.supplier_article || '',
@@ -218,7 +223,7 @@ async function addStocksSheet(
       'Дата последнего изменения': s.last_change_date ? dayjs(s.last_change_date).format('YYYY-MM-DD HH:mm') : '',
     }));
   } else {
-    const summary = await stockRepo.getStocksSummary();
+    const summary = await stockRepo.getStocksSummary(cabinetId);
     rows = summary.map(s => ({
       'Артикул': s.nm_id,
       'Артикул продавца': s.supplier_article || '',
@@ -241,6 +246,7 @@ async function addStocksSheet(
 // === Sheet 4: Воронка по точкам входа ===
 async function addTrafficSourcesSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom: string,
   dateTo: string,
   nmId?: number
@@ -248,7 +254,7 @@ async function addTrafficSourcesSheet(
   let rows: any[] = [];
 
   if (nmId) {
-    const sources = await trafficRepo.getTrafficSourcesByNmId(nmId, dateFrom, dateTo);
+    const sources = await trafficRepo.getTrafficSourcesByNmId(cabinetId, nmId, dateFrom, dateTo);
     rows = sources.map(s => ({
       'Артикул': s.nm_id,
       'Дата': dayjs(s.date).format('YYYY-MM-DD'),
@@ -262,9 +268,9 @@ async function addTrafficSourcesSheet(
     }));
   } else {
     // For all products, show summary by source
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     for (const product of products) {
-      const summary = await trafficRepo.getTrafficSourcesSummary(product.nm_id, dateFrom, dateTo);
+      const summary = await trafficRepo.getTrafficSourcesSummary(cabinetId, product.nm_id, dateFrom, dateTo);
       for (const s of summary) {
         rows.push({
           'Артикул': product.nm_id,
@@ -291,13 +297,14 @@ async function addTrafficSourcesSheet(
 // === Sheet 5: Маркетинговая активность ===
 async function addMarketingEventsSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom: string,
   dateTo: string,
   nmId?: number
 ): Promise<void> {
   const events = nmId
-    ? await eventsRepo.getEventsByNmId(nmId, dateFrom, dateTo)
-    : await eventsRepo.getAllEvents(dateFrom, dateTo);
+    ? await eventsRepo.getEventsByNmId(cabinetId, nmId, dateFrom, dateTo)
+    : await eventsRepo.getAllEvents(cabinetId, dateFrom, dateTo);
 
   const eventTypeLabels: Record<string, string> = {
     price_change: 'Изменение цены',
@@ -329,14 +336,15 @@ async function addMarketingEventsSheet(
 // === Sheet 6: Рекламные компании ===
 async function addCampaignsSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom: string,
   dateTo: string
 ): Promise<void> {
-  const campaigns = await repo.getCampaigns();
+  const campaigns = await repo.getCampaigns(cabinetId);
   const rows: any[] = [];
 
   for (const campaign of campaigns) {
-    const stats = await repo.getCampaignStats(campaign.campaign_id, dateFrom, dateTo);
+    const stats = await repo.getCampaignStats(cabinetId, campaign.campaign_id, dateFrom, dateTo);
 
     if (stats.length === 0) {
       rows.push({
@@ -393,14 +401,15 @@ async function addCampaignsSheet(
 // === Sheet 7: Кластеры (Keywords + Search Query Analytics) ===
 async function addKeywordsSheet(
   wb: XLSX.WorkBook,
+  cabinetId: number,
   dateFrom?: string,
   dateTo?: string,
   nmId?: number
 ): Promise<void> {
   // Try search_query_analytics first (richer data from Seller Analytics)
   const searchData = nmId
-    ? await searchRepo.getSearchQuerySummary(nmId, dateFrom, dateTo)
-    : await searchRepo.getAllSearchQuerySummary(dateFrom, dateTo);
+    ? await searchRepo.getSearchQuerySummary(cabinetId, nmId, dateFrom, dateTo)
+    : await searchRepo.getAllSearchQuerySummary(cabinetId, dateFrom, dateTo);
 
   const rows: any[] = [];
 
@@ -422,11 +431,11 @@ async function addKeywordsSheet(
   } else {
     // Fallback to keyword_collections + keyword_positions (manual tracking)
     const allKeywords = nmId
-      ? await keywordsRepo.getKeywords(nmId)
-      : await keywordsRepo.getAllTrackedKeywords();
+      ? await keywordsRepo.getKeywords(cabinetId, nmId)
+      : await keywordsRepo.getAllTrackedKeywords(cabinetId);
 
     for (const kw of allKeywords) {
-      const positions = await keywordsRepo.getKeywordPositions(kw.nm_id, kw.keyword, 1);
+      const positions = await keywordsRepo.getKeywordPositions(cabinetId, kw.nm_id, kw.keyword, 1);
       const latestPosition = positions[0];
 
       rows.push({

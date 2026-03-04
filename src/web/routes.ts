@@ -14,6 +14,8 @@ import importRoutes from './import-routes';
 import ordersRoutes from './orders-routes';
 import stockRoutes from './stock-routes';
 import eventsRoutes from './events-routes';
+import cabinetRoutes from './cabinet-routes';
+import adminRoutes from './admin-routes';
 
 const app = new Hono();
 
@@ -44,5 +46,7 @@ app.route('/', importRoutes);
 app.route('/', ordersRoutes);
 app.route('/', stockRoutes);
 app.route('/', eventsRoutes);
+app.route('/', cabinetRoutes);
+app.route('/', adminRoutes);
 
 export default app;

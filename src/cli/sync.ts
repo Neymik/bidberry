@@ -5,7 +5,8 @@ import * as ordersService from '../services/orders-service';
 import * as stockService from '../services/stock-service';
 import * as financialService from '../services/financial-service';
 import * as searchService from '../services/search-analytics-service';
-import { getWBClient } from '../api/wb-client';
+import * as cabinetsRepo from '../db/cabinets-repository';
+import { getWBClientForCabinet, WBApiClient } from '../api/wb-client';
 import dayjs from 'dayjs';
 
 interface SyncResult {
@@ -23,13 +24,12 @@ function logError(msg: string) {
   console.error(`[sync] ${msg}`);
 }
 
-async function syncCampaigns(): Promise<SyncResult> {
+async function syncCampaigns(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing campaigns...');
-  const importId = await repo.createImportRecord('campaigns-sync');
+  const importId = await repo.createImportRecord('campaigns-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
     const campaigns = await wbClient.getCampaigns();
-    const count = await repo.upsertCampaigns(campaigns);
+    const count = await repo.upsertCampaigns(cabinetId, campaigns);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`campaigns: ${count} synced, 0 errors`);
     return { target: 'campaigns', synced: count, errors: 0, errorMessages: [] };
@@ -40,11 +40,10 @@ async function syncCampaigns(): Promise<SyncResult> {
   }
 }
 
-async function syncProducts(): Promise<SyncResult> {
+async function syncProducts(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing products...');
-  const importId = await repo.createImportRecord('products-sync');
+  const importId = await repo.createImportRecord('products-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
@@ -57,7 +56,7 @@ async function syncProducts(): Promise<SyncResult> {
         if (cards.length === 0) break;
 
         for (const card of cards) {
-          await repo.upsertProduct({
+          await repo.upsertProduct(cabinetId, {
             nmId: card.nmID,
             vendorCode: card.vendorCode,
             brand: card.brand,
@@ -89,12 +88,11 @@ async function syncProducts(): Promise<SyncResult> {
   }
 }
 
-async function syncAnalytics(): Promise<SyncResult> {
+async function syncAnalytics(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing product analytics...');
-  const importId = await repo.createImportRecord('product-analytics-sync');
+  const importId = await repo.createImportRecord('product-analytics-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     if (products.length === 0) {
       await repo.updateImportRecord(importId, 'completed', 0);
       log('analytics: 0 synced (no products)');
@@ -116,7 +114,7 @@ async function syncAnalytics(): Promise<SyncResult> {
         const analytics = await wbClient.getProductAnalytics(nmIds, dateFrom, dateTo);
         for (const item of analytics) {
           if (item.statistics?.selectedPeriod) {
-            await repo.upsertProductAnalytics(item, dateFrom);
+            await repo.upsertProductAnalytics(cabinetId, item, dateFrom);
             totalSynced++;
           }
         }
@@ -141,12 +139,11 @@ async function syncAnalytics(): Promise<SyncResult> {
   }
 }
 
-async function syncTraffic(): Promise<SyncResult> {
+async function syncTraffic(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing traffic sources...');
-  const importId = await repo.createImportRecord('traffic-sources-sync');
+  const importId = await repo.createImportRecord('traffic-sources-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     if (products.length === 0) {
       await repo.updateImportRecord(importId, 'completed', 0);
       log('traffic: 0 synced (no products)');
@@ -184,7 +181,7 @@ async function syncTraffic(): Promise<SyncResult> {
           if (!nmId || !stats) continue;
 
           // Save total row
-          await trafficRepo.upsertTrafficSource({
+          await trafficRepo.upsertTrafficSource(cabinetId, {
             nm_id: nmId,
             date: dateFrom,
             source_name: 'total',
@@ -203,7 +200,7 @@ async function syncTraffic(): Promise<SyncResult> {
           for (const [key, label] of Object.entries(SOURCE_KEYS)) {
             const sourceViews = stats[key] ?? 0;
             if (sourceViews > 0) {
-              await trafficRepo.upsertTrafficSource({
+              await trafficRepo.upsertTrafficSource(cabinetId, {
                 nm_id: nmId,
                 date: dateFrom,
                 source_name: label,
@@ -241,11 +238,10 @@ async function syncTraffic(): Promise<SyncResult> {
   }
 }
 
-async function syncPrices(): Promise<SyncResult> {
+async function syncPrices(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing prices...');
-  const importId = await repo.createImportRecord('prices-sync');
+  const importId = await repo.createImportRecord('prices-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
     let totalSynced = 0;
     let offset = 0;
     const limit = 1000;
@@ -260,7 +256,7 @@ async function syncPrices(): Promise<SyncResult> {
           const basePrice = item.sizes?.[0]?.price || item.price || 0;
           const discountedPrice = item.sizes?.[0]?.discountedPrice || basePrice;
           const discount = item.discount || (basePrice > 0 ? Math.round((1 - discountedPrice / basePrice) * 100) : 0);
-          await repo.upsertProduct({
+          await repo.upsertProduct(cabinetId, {
             nmId: item.nmID,
             price: basePrice,
             discount: discount,
@@ -288,11 +284,10 @@ async function syncPrices(): Promise<SyncResult> {
   }
 }
 
-async function syncPromotions(): Promise<SyncResult> {
+async function syncPromotions(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing promotions...');
-  const importId = await repo.createImportRecord('promotions-sync');
+  const importId = await repo.createImportRecord('promotions-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
     const promotions = await wbClient.getPromotions();
     let totalSynced = 0;
     let errors = 0;
@@ -308,7 +303,7 @@ async function syncPromotions(): Promise<SyncResult> {
         const participatingNmIds = new Set(nomenclatures.map((n: any) => n.nmID || n.nmId));
 
         for (const nmId of participatingNmIds) {
-          await promosRepo.upsertPromoParticipation({
+          await promosRepo.upsertPromoParticipation(cabinetId, {
             nm_id: nmId,
             promo_id: promo.id,
             promo_name: promo.name || '',
@@ -345,12 +340,11 @@ async function syncPromotions(): Promise<SyncResult> {
   }
 }
 
-async function syncCampaignProducts(): Promise<SyncResult> {
+async function syncCampaignProducts(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing campaign products...');
-  const importId = await repo.createImportRecord('campaign-products-sync');
+  const importId = await repo.createImportRecord('campaign-products-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
-    const campaigns = await repo.getCampaigns();
+    const campaigns = await repo.getCampaigns(cabinetId);
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
@@ -370,7 +364,7 @@ async function syncCampaignProducts(): Promise<SyncResult> {
           for (const nm of nmSettings) {
             const nmId = nm.nm_id || nm.nmId || nm.nmID;
             if (nmId) {
-              await repo.upsertCampaignProduct(campId, nmId);
+              await repo.upsertCampaignProduct(cabinetId, campId, nmId);
               totalSynced++;
             }
           }
@@ -395,12 +389,12 @@ async function syncCampaignProducts(): Promise<SyncResult> {
   }
 }
 
-async function syncOrders(): Promise<SyncResult> {
+async function syncOrders(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing orders...');
-  const importId = await repo.createImportRecord('orders-sync');
+  const importId = await repo.createImportRecord('orders-sync', undefined, cabinetId);
   try {
     const dateFrom = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
-    const count = await ordersService.syncOrders(dateFrom);
+    const count = await ordersService.syncOrders(cabinetId, wbClient, dateFrom);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`orders: ${count} synced, 0 errors`);
     return { target: 'orders', synced: count, errors: 0, errorMessages: [] };
@@ -411,11 +405,11 @@ async function syncOrders(): Promise<SyncResult> {
   }
 }
 
-async function syncStocks(): Promise<SyncResult> {
+async function syncStocks(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing stocks...');
-  const importId = await repo.createImportRecord('stocks-sync');
+  const importId = await repo.createImportRecord('stocks-sync', undefined, cabinetId);
   try {
-    const count = await stockService.syncStocks();
+    const count = await stockService.syncStocks(cabinetId, wbClient);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`stocks: ${count} synced, 0 errors`);
     return { target: 'stocks', synced: count, errors: 0, errorMessages: [] };
@@ -426,12 +420,11 @@ async function syncStocks(): Promise<SyncResult> {
   }
 }
 
-async function syncCampaignStats(): Promise<SyncResult> {
+async function syncCampaignStats(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing campaign stats...');
-  const importId = await repo.createImportRecord('campaign-stats-sync');
+  const importId = await repo.createImportRecord('campaign-stats-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
-    const campaigns = await repo.getCampaigns();
+    const campaigns = await repo.getCampaigns(cabinetId);
     const campaignIds = campaigns.map(c => c.campaign_id);
     if (campaignIds.length === 0) {
       await repo.updateImportRecord(importId, 'completed', 0);
@@ -441,7 +434,7 @@ async function syncCampaignStats(): Promise<SyncResult> {
     const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs().format('YYYY-MM-DD');
     const stats = await wbClient.getCampaignStats(campaignIds, dateFrom, dateTo);
-    const count = await repo.upsertCampaignStatsBatch(stats);
+    const count = await repo.upsertCampaignStatsBatch(cabinetId, stats);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`stats: ${count} synced, 0 errors`);
     return { target: 'stats', synced: count, errors: 0, errorMessages: [] };
@@ -452,13 +445,13 @@ async function syncCampaignStats(): Promise<SyncResult> {
   }
 }
 
-async function syncSales(): Promise<SyncResult> {
+async function syncSales(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing sales report...');
-  const importId = await repo.createImportRecord('sales-sync');
+  const importId = await repo.createImportRecord('sales-sync', undefined, cabinetId);
   try {
     const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs().format('YYYY-MM-DD');
-    const count = await financialService.syncSalesReport(dateFrom, dateTo);
+    const count = await financialService.syncSalesReport(cabinetId, wbClient, dateFrom, dateTo);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`sales: ${count} synced, 0 errors`);
     return { target: 'sales', synced: count, errors: 0, errorMessages: [] };
@@ -469,13 +462,13 @@ async function syncSales(): Promise<SyncResult> {
   }
 }
 
-async function syncSearchQueries(): Promise<SyncResult> {
+async function syncSearchQueries(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing search queries...');
-  const importId = await repo.createImportRecord('search-queries-sync');
+  const importId = await repo.createImportRecord('search-queries-sync', undefined, cabinetId);
   try {
     const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs().format('YYYY-MM-DD');
-    const count = await searchService.syncSearchQueries(dateFrom, dateTo);
+    const count = await searchService.syncSearchQueries(cabinetId, wbClient, dateFrom, dateTo);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`search-queries: ${count} synced, 0 errors`);
     return { target: 'search-queries', synced: count, errors: 0, errorMessages: [] };
@@ -486,11 +479,11 @@ async function syncSearchQueries(): Promise<SyncResult> {
   }
 }
 
-async function syncClusterStats(): Promise<SyncResult> {
+async function syncClusterStats(cabinetId: number, wbClient: WBApiClient): Promise<SyncResult> {
   log('Syncing search cluster stats...');
-  const importId = await repo.createImportRecord('cluster-stats-sync');
+  const importId = await repo.createImportRecord('cluster-stats-sync', undefined, cabinetId);
   try {
-    const count = await searchService.syncSearchClusters();
+    const count = await searchService.syncSearchClusters(cabinetId, wbClient);
     await repo.updateImportRecord(importId, 'completed', count);
     log(`cluster-stats: ${count} synced, 0 errors`);
     return { target: 'cluster-stats', synced: count, errors: 0, errorMessages: [] };
@@ -501,8 +494,10 @@ async function syncClusterStats(): Promise<SyncResult> {
   }
 }
 
-async function showStatus(): Promise<void> {
-  const history = await repo.getImportHistory(20);
+async function showStatus(cabinetId?: number): Promise<void> {
+  const history = cabinetId
+    ? await repo.getImportHistory(cabinetId, 20)
+    : await repo.getImportHistory(0, 20); // 0 = show all
   if (history.length === 0) {
     log('No sync history found.');
     return;
@@ -537,7 +532,9 @@ async function showStatus(): Promise<void> {
   console.log('-'.repeat(90));
 }
 
-const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> = {
+type SyncFn = (cabinetId: number, wbClient: WBApiClient) => Promise<SyncResult>;
+
+const SYNC_FNS: Record<string, SyncFn> = {
   campaigns: syncCampaigns,
   products: syncProducts,
   analytics: syncAnalytics,
@@ -551,11 +548,17 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
   'campaign-products': syncCampaignProducts,
   'search-queries': syncSearchQueries,
   'cluster-stats': syncClusterStats,
-  status: showStatus,
-  all: async () => {
-    log('Starting full sync...');
+};
+
+async function runSyncForCabinet(
+  command: string,
+  cabinetId: number,
+  wbClient: WBApiClient
+): Promise<SyncResult[]> {
+  if (command === 'all') {
+    log(`Starting full sync for cabinet ${cabinetId}...`);
     const results: SyncResult[] = [];
-    const syncFns = [
+    const fns: SyncFn[] = [
       syncCampaigns,
       syncProducts,
       syncPrices,
@@ -571,22 +574,21 @@ const COMMANDS: Record<string, () => Promise<SyncResult | SyncResult[] | void>> 
       syncClusterStats,
     ];
 
-    for (const fn of syncFns) {
-      const result = await fn();
+    for (const fn of fns) {
+      const result = await fn(cabinetId, wbClient);
       results.push(result);
     }
-
-    const totalSynced = results.reduce((sum, r) => sum + r.synced, 0);
-    const totalErrors = results.reduce((sum, r) => sum + r.errors, 0);
-
-    log(`Complete. Total: ${totalSynced} synced, ${totalErrors} errors`);
-    console.log(JSON.stringify({ synced: totalSynced, errors: totalErrors, details: results }));
     return results;
-  },
-};
+  }
+
+  const fn = SYNC_FNS[command];
+  if (!fn) throw new Error(`Unknown command: ${command}`);
+  const result = await fn(cabinetId, wbClient);
+  return [result];
+}
 
 const USAGE = `
-Usage: bun run src/cli/sync.ts [command]
+Usage: bun run src/cli/sync.ts [command] [--cabinet <id>]
 
 Commands:
   all              - Run all syncs sequentially
@@ -604,37 +606,73 @@ Commands:
   search-queries   - Sync search query analytics
   cluster-stats    - Sync search cluster stats for campaigns
   status           - Show last sync status from import_history
+
+Options:
+  --cabinet <id>   - Sync only the specified cabinet (default: all active cabinets)
 `;
 
 async function main() {
-  const command = process.argv[2];
+  const args = process.argv.slice(2);
+  const command = args.find(a => !a.startsWith('--'));
+  const cabinetIdx = args.indexOf('--cabinet');
+  const cabinetIdArg = cabinetIdx >= 0 ? parseInt(args[cabinetIdx + 1] || '') : undefined;
 
-  if (!command || !COMMANDS[command]) {
+  const validCommands = [...Object.keys(SYNC_FNS), 'all', 'status'];
+
+  if (!command || !validCommands.includes(command)) {
     console.log(USAGE);
     process.exit(command ? 1 : 0);
   }
 
   try {
-    const result = await COMMANDS[command]();
-
-    // Determine exit code
+    // Handle status command separately (no WB client needed)
     if (command === 'status') {
+      await showStatus(cabinetIdArg);
       process.exit(0);
     }
 
-    if (Array.isArray(result)) {
-      // 'all' command
-      const totalErrors = result.reduce((sum, r) => sum + r.errors, 0);
-      const totalSynced = result.reduce((sum, r) => sum + r.synced, 0);
-      if (totalErrors > 0 && totalSynced === 0) process.exit(2);
-      if (totalErrors > 0) process.exit(1);
-      process.exit(0);
+    // Determine which cabinets to sync
+    let cabinets: { id: number; wb_api_key: string; name: string }[];
+    if (cabinetIdArg) {
+      const cabinet = await cabinetsRepo.getCabinetById(cabinetIdArg);
+      if (!cabinet) {
+        logError(`Cabinet ${cabinetIdArg} not found`);
+        process.exit(1);
+      }
+      cabinets = [cabinet];
+    } else {
+      cabinets = await cabinetsRepo.getActiveCabinets();
+      if (cabinets.length === 0) {
+        logError('No active cabinets found');
+        process.exit(1);
+      }
     }
 
-    if (result) {
-      if (result.errors > 0 && result.synced === 0) process.exit(2);
-      if (result.errors > 0) process.exit(1);
+    const allResults: SyncResult[] = [];
+
+    for (const cabinet of cabinets) {
+      log(`=== Cabinet ${cabinet.id}: ${cabinet.name} ===`);
+      const wbClient = getWBClientForCabinet(cabinet.id, cabinet.wb_api_key);
+      try {
+        const results = await runSyncForCabinet(command, cabinet.id, wbClient);
+        allResults.push(...results);
+        await cabinetsRepo.updateCabinetLastSync(cabinet.id);
+      } catch (error: any) {
+        logError(`Cabinet ${cabinet.id} error: ${error.message}`);
+        allResults.push({ target: command, synced: 0, errors: 1, errorMessages: [error.message] });
+      }
     }
+
+    const totalSynced = allResults.reduce((sum, r) => sum + r.synced, 0);
+    const totalErrors = allResults.reduce((sum, r) => sum + r.errors, 0);
+
+    log(`Complete. Total: ${totalSynced} synced, ${totalErrors} errors`);
+    if (command === 'all' || cabinets.length > 1) {
+      console.log(JSON.stringify({ synced: totalSynced, errors: totalErrors, details: allResults }));
+    }
+
+    if (totalErrors > 0 && totalSynced === 0) process.exit(2);
+    if (totalErrors > 0) process.exit(1);
     process.exit(0);
   } catch (error: any) {
     logError(`Fatal error: ${error.message}`);

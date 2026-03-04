@@ -2,6 +2,7 @@ import { query, execute } from './connection';
 
 export interface DBSearchQueryAnalytics {
   id: number;
+  cabinet_id: number;
   nm_id: number;
   keyword: string;
   date: Date;
@@ -20,6 +21,7 @@ export interface DBSearchQueryAnalytics {
 
 export interface DBSearchClusterStats {
   id: number;
+  cabinet_id: number;
   campaign_id: number;
   cluster_name: string;
   date: Date;
@@ -34,7 +36,7 @@ export interface DBSearchClusterStats {
   created_at: Date;
 }
 
-export async function upsertSearchQueryAnalytics(data: {
+export async function upsertSearchQueryAnalytics(cabinetId: number, data: {
   nm_id: number;
   keyword: string;
   date: string;
@@ -51,9 +53,9 @@ export async function upsertSearchQueryAnalytics(data: {
 }): Promise<void> {
   await execute(
     `INSERT INTO search_query_analytics
-      (nm_id, keyword, date, avg_position, impressions, ctr, card_visits,
+      (cabinet_id, nm_id, keyword, date, avg_position, impressions, ctr, card_visits,
        cart_adds, cart_conversion, orders_count, order_conversion, visibility, current_price)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        avg_position = VALUES(avg_position),
        impressions = VALUES(impressions),
@@ -66,6 +68,7 @@ export async function upsertSearchQueryAnalytics(data: {
        visibility = VALUES(visibility),
        current_price = VALUES(current_price)`,
     [
+      cabinetId,
       data.nm_id,
       data.keyword,
       data.date,
@@ -83,7 +86,7 @@ export async function upsertSearchQueryAnalytics(data: {
   );
 }
 
-export async function upsertSearchClusterStats(data: {
+export async function upsertSearchClusterStats(cabinetId: number, data: {
   campaign_id: number;
   cluster_name: string;
   date: string;
@@ -98,8 +101,8 @@ export async function upsertSearchClusterStats(data: {
 }): Promise<void> {
   await execute(
     `INSERT INTO search_cluster_stats
-      (campaign_id, cluster_name, date, views, clicks, ctr, cpc, cpm, cart_adds, orders_count, spend)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (cabinet_id, campaign_id, cluster_name, date, views, clicks, ctr, cpc, cpm, cart_adds, orders_count, spend)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        views = VALUES(views),
        clicks = VALUES(clicks),
@@ -110,6 +113,7 @@ export async function upsertSearchClusterStats(data: {
        orders_count = VALUES(orders_count),
        spend = VALUES(spend)`,
     [
+      cabinetId,
       data.campaign_id,
       data.cluster_name,
       data.date,
@@ -126,12 +130,13 @@ export async function upsertSearchClusterStats(data: {
 }
 
 export async function getSearchQueryAnalytics(
+  cabinetId: number,
   nmId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<DBSearchQueryAnalytics[]> {
-  let sql = 'SELECT * FROM search_query_analytics WHERE nm_id = ?';
-  const params: any[] = [nmId];
+  let sql = 'SELECT * FROM search_query_analytics WHERE cabinet_id = ? AND nm_id = ?';
+  const params: any[] = [cabinetId, nmId];
   if (dateFrom) { sql += ' AND date >= ?'; params.push(dateFrom); }
   if (dateTo) { sql += ' AND date <= ?'; params.push(dateTo); }
   sql += ' ORDER BY date DESC, impressions DESC';
@@ -139,6 +144,7 @@ export async function getSearchQueryAnalytics(
 }
 
 export async function getSearchQuerySummary(
+  cabinetId: number,
   nmId: number,
   dateFrom?: string,
   dateTo?: string
@@ -154,9 +160,9 @@ export async function getSearchQuerySummary(
       ROUND(AVG(ctr) * 100, 2) as avg_ctr,
       ROUND(AVG(visibility) * 100, 2) as avg_visibility
     FROM search_query_analytics
-    WHERE nm_id = ?
+    WHERE cabinet_id = ? AND nm_id = ?
   `;
-  const params: any[] = [nmId];
+  const params: any[] = [cabinetId, nmId];
   if (dateFrom) { sql += ' AND date >= ?'; params.push(dateFrom); }
   if (dateTo) { sql += ' AND date <= ?'; params.push(dateTo); }
   sql += ' GROUP BY keyword ORDER BY total_impressions DESC';
@@ -164,6 +170,7 @@ export async function getSearchQuerySummary(
 }
 
 export async function getAllSearchQuerySummary(
+  cabinetId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<any[]> {
@@ -179,9 +186,9 @@ export async function getAllSearchQuerySummary(
       ROUND(AVG(ctr) * 100, 2) as avg_ctr,
       ROUND(AVG(visibility) * 100, 2) as avg_visibility
     FROM search_query_analytics
-    WHERE 1=1
+    WHERE cabinet_id = ?
   `;
-  const params: any[] = [];
+  const params: any[] = [cabinetId];
   if (dateFrom) { sql += ' AND date >= ?'; params.push(dateFrom); }
   if (dateTo) { sql += ' AND date <= ?'; params.push(dateTo); }
   sql += ' GROUP BY nm_id, keyword ORDER BY nm_id, total_impressions DESC';
@@ -189,12 +196,13 @@ export async function getAllSearchQuerySummary(
 }
 
 export async function getSearchClusterStatsByCampaign(
+  cabinetId: number,
   campaignId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<DBSearchClusterStats[]> {
-  let sql = 'SELECT * FROM search_cluster_stats WHERE campaign_id = ?';
-  const params: any[] = [campaignId];
+  let sql = 'SELECT * FROM search_cluster_stats WHERE cabinet_id = ? AND campaign_id = ?';
+  const params: any[] = [cabinetId, campaignId];
   if (dateFrom) { sql += ' AND date >= ?'; params.push(dateFrom); }
   if (dateTo) { sql += ' AND date <= ?'; params.push(dateTo); }
   sql += ' ORDER BY date DESC, views DESC';

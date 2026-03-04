@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../../hooks/useApi';
 import { useToast } from '../../hooks/useToast';
 import { useAuth } from '../../hooks/useAuth';
+import { useCabinet } from '../../hooks/useCabinet';
 
 function formatNumber(num: number | null | undefined): string {
   if (num == null) return '-';
@@ -16,10 +17,11 @@ export default function AppHeader() {
   const [syncProgress, setSyncProgress] = useState('');
   const { showToast } = useToast();
   const { user, logout } = useAuth();
+  const { cabinets, selectedCabinetId, selectCabinet } = useCabinet();
 
   useEffect(() => {
     checkHealth();
-  }, []);
+  }, [selectedCabinetId]);
 
   async function checkHealth() {
     try {
@@ -93,6 +95,20 @@ export default function AppHeader() {
       <div className="max-w-full mx-auto px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <h1 className="text-xl font-bold text-purple-600">WB Analytics</h1>
+          {cabinets.length > 1 && (
+            <select
+              value={selectedCabinetId || ''}
+              onChange={(e) => selectCabinet(parseInt(e.target.value))}
+              className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+            >
+              {cabinets.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
+          {cabinets.length === 1 && (
+            <span className="text-sm text-gray-500">{cabinets[0].name}</span>
+          )}
           <span className={`text-xs px-3 py-1 rounded-full ${statusClass}`}>{status}</span>
         </div>
         <div className="flex items-center space-x-4">

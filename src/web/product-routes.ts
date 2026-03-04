@@ -4,7 +4,7 @@ import { z } from 'zod';
 import * as repo from '../db/repository';
 import * as trafficRepo from '../db/traffic-repository';
 import * as promosRepo from '../db/promotions-repository';
-import { getWBClient } from '../api/wb-client';
+import { getCabinetId, getWBClientFromContext } from './cabinet-context';
 import dayjs from 'dayjs';
 
 const app = new Hono();
@@ -15,8 +15,9 @@ const dateRangeSchema = z.object({
 });
 
 app.get('/api/products', async (c) => {
+  const cabinetId = getCabinetId(c);
   try {
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     return c.json(products);
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -24,9 +25,10 @@ app.get('/api/products', async (c) => {
 });
 
 app.get('/api/products/:id', async (c) => {
+  const cabinetId = getCabinetId(c);
   const id = parseInt(c.req.param('id'));
   try {
-    const product = await repo.getProductById(id);
+    const product = await repo.getProductById(cabinetId, id);
     if (!product) return c.json({ error: 'Product not found' }, 404);
     return c.json(product);
   } catch (error: any) {
@@ -35,10 +37,11 @@ app.get('/api/products/:id', async (c) => {
 });
 
 app.get('/api/products/:id/analytics', zValidator('query', dateRangeSchema), async (c) => {
+  const cabinetId = getCabinetId(c);
   const id = parseInt(c.req.param('id'));
   const { dateFrom, dateTo } = c.req.valid('query');
   try {
-    const analytics = await repo.getProductAnalytics(id, dateFrom, dateTo);
+    const analytics = await repo.getProductAnalytics(cabinetId, id, dateFrom, dateTo);
     return c.json(analytics);
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -47,9 +50,10 @@ app.get('/api/products/:id/analytics', zValidator('query', dateRangeSchema), asy
 
 // Sync products from WB Content API
 app.post('/api/sync/products', async (c) => {
-  const importId = await repo.createImportRecord('products-sync');
+  const cabinetId = getCabinetId(c);
+  const importId = await repo.createImportRecord('products-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
@@ -63,7 +67,7 @@ app.post('/api/sync/products', async (c) => {
         if (cards.length === 0) break;
 
         for (const card of cards) {
-          await repo.upsertProduct({
+          await repo.upsertProduct(cabinetId, {
             nmId: card.nmID,
             vendorCode: card.vendorCode,
             brand: card.brand,
@@ -95,19 +99,20 @@ app.post('/api/sync/products', async (c) => {
 
 // Sync product analytics from WB Analytics API
 app.post('/api/sync/product-analytics', async (c) => {
-  const importId = await repo.createImportRecord('product-analytics-sync');
+  const cabinetId = getCabinetId(c);
+  const importId = await repo.createImportRecord('product-analytics-sync', undefined, cabinetId);
   try {
     const body = await c.req.json().catch(() => ({})) as { dateFrom?: string; dateTo?: string };
     const dateFrom = body.dateFrom || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
     const dateTo = body.dateTo || dayjs().format('YYYY-MM-DD');
 
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     if (products.length === 0) {
       await repo.updateImportRecord(importId, 'completed', 0);
       return c.json({ success: true, synced: 0, message: 'No products to sync analytics for' });
     }
 
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
@@ -123,7 +128,7 @@ app.post('/api/sync/product-analytics', async (c) => {
         for (const item of analytics) {
           const period = item.statistics?.selectedPeriod;
           if (period) {
-            await repo.upsertProductAnalytics(item, dateFrom);
+            await repo.upsertProductAnalytics(cabinetId, item, dateFrom);
             totalSynced++;
           }
         }
@@ -148,19 +153,20 @@ app.post('/api/sync/product-analytics', async (c) => {
 
 // Sync traffic sources from WB Analytics API (detailed report)
 app.post('/api/sync/traffic-sources', async (c) => {
-  const importId = await repo.createImportRecord('traffic-sources-sync');
+  const cabinetId = getCabinetId(c);
+  const importId = await repo.createImportRecord('traffic-sources-sync', undefined, cabinetId);
   try {
     const body = await c.req.json().catch(() => ({})) as { dateFrom?: string; dateTo?: string };
     const dateFrom = body.dateFrom || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
     const dateTo = body.dateTo || dayjs().format('YYYY-MM-DD');
 
-    const products = await repo.getProducts();
+    const products = await repo.getProducts(cabinetId);
     if (products.length === 0) {
       await repo.updateImportRecord(importId, 'completed', 0);
       return c.json({ success: true, synced: 0, message: 'No products to sync traffic sources for' });
     }
 
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
@@ -180,7 +186,7 @@ app.post('/api/sync/traffic-sources', async (c) => {
           const stats = item.statistic?.selected;
           if (!nmId || !stats) continue;
 
-          await trafficRepo.upsertTrafficSource({
+          await trafficRepo.upsertTrafficSource(cabinetId, {
             nm_id: nmId,
             date: dateFrom,
             source_name: 'total',
@@ -216,9 +222,10 @@ app.post('/api/sync/traffic-sources', async (c) => {
 
 // Sync prices from WB Prices API
 app.post('/api/sync/prices', async (c) => {
-  const importId = await repo.createImportRecord('prices-sync');
+  const cabinetId = getCabinetId(c);
+  const importId = await repo.createImportRecord('prices-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     let totalSynced = 0;
     let offset = 0;
     const limit = 1000;
@@ -232,7 +239,7 @@ app.post('/api/sync/prices', async (c) => {
         const basePrice = item.sizes?.[0]?.price || item.price || 0;
         const discountedPrice = item.sizes?.[0]?.discountedPrice || basePrice;
         const discount = item.discount || (basePrice > 0 ? Math.round((1 - discountedPrice / basePrice) * 100) : 0);
-        await repo.upsertProduct({
+        await repo.upsertProduct(cabinetId, {
           nmId: item.nmID,
           price: basePrice,
           discount: discount,
@@ -256,9 +263,10 @@ app.post('/api/sync/prices', async (c) => {
 
 // Get product promotions
 app.get('/api/products/:id/promotions', async (c) => {
+  const cabinetId = getCabinetId(c);
   const nmId = parseInt(c.req.param('id'));
   try {
-    const promos = await promosRepo.getPromosByNmId(nmId);
+    const promos = await promosRepo.getPromosByNmId(cabinetId, nmId);
     return c.json(promos);
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -267,9 +275,10 @@ app.get('/api/products/:id/promotions', async (c) => {
 
 // Sync promotions from WB Calendar API
 app.post('/api/sync/promotions', async (c) => {
-  const importId = await repo.createImportRecord('promotions-sync');
+  const cabinetId = getCabinetId(c);
+  const importId = await repo.createImportRecord('promotions-sync', undefined, cabinetId);
   try {
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     const promotions = await wbClient.getPromotions();
     let totalSynced = 0;
     let errors = 0;
@@ -282,7 +291,7 @@ app.post('/api/sync/promotions', async (c) => {
         for (const nm of nomenclatures) {
           const nmId = nm.nmID || nm.nmId;
           if (!nmId) continue;
-          await promosRepo.upsertPromoParticipation({
+          await promosRepo.upsertPromoParticipation(cabinetId, {
             nm_id: nmId,
             promo_id: promo.id,
             promo_name: promo.name || '',

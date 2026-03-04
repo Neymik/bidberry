@@ -14,10 +14,10 @@ import dayjs from 'dayjs';
 
 // === CAMPAIGNS ===
 
-export async function upsertCampaign(campaign: WBCampaign): Promise<void> {
+export async function upsertCampaign(cabinetId: number, campaign: WBCampaign): Promise<void> {
   const sql = `
-    INSERT INTO campaigns (campaign_id, name, type, status, daily_budget, start_date, end_date)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO campaigns (cabinet_id, campaign_id, name, type, status, daily_budget, start_date, end_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name = VALUES(name),
       type = VALUES(type),
@@ -28,6 +28,7 @@ export async function upsertCampaign(campaign: WBCampaign): Promise<void> {
   `;
 
   await execute(sql, [
+    cabinetId,
     campaign.advertId,
     campaign.name ?? null,
     getCampaignTypeName(campaign.type),
@@ -38,34 +39,37 @@ export async function upsertCampaign(campaign: WBCampaign): Promise<void> {
   ]);
 }
 
-export async function upsertCampaigns(campaigns: WBCampaign[]): Promise<number> {
+export async function upsertCampaigns(cabinetId: number, campaigns: WBCampaign[]): Promise<number> {
   let count = 0;
   for (const campaign of campaigns) {
-    await upsertCampaign(campaign);
+    await upsertCampaign(cabinetId, campaign);
     count++;
   }
   return count;
 }
 
-export async function getCampaigns(): Promise<DBCampaign[]> {
-  return query<DBCampaign[]>('SELECT * FROM campaigns ORDER BY campaign_id DESC');
+export async function getCampaigns(cabinetId: number): Promise<DBCampaign[]> {
+  return query<DBCampaign[]>(
+    'SELECT * FROM campaigns WHERE cabinet_id = ? ORDER BY campaign_id DESC',
+    [cabinetId]
+  );
 }
 
-export async function getCampaignById(campaignId: number): Promise<DBCampaign | null> {
+export async function getCampaignById(cabinetId: number, campaignId: number): Promise<DBCampaign | null> {
   const rows = await query<DBCampaign[]>(
-    'SELECT * FROM campaigns WHERE campaign_id = ?',
-    [campaignId]
+    'SELECT * FROM campaigns WHERE cabinet_id = ? AND campaign_id = ?',
+    [cabinetId, campaignId]
   );
   return rows[0] || null;
 }
 
 // === CAMPAIGN STATS ===
 
-export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void> {
+export async function upsertCampaignStats(cabinetId: number, stats: WBCampaignStats): Promise<void> {
   const sql = `
     INSERT INTO campaign_stats
-      (campaign_id, date, views, clicks, ctr, cpc, cpm, spend, orders, order_sum, atbs, shks, sum_price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (cabinet_id, campaign_id, date, views, clicks, ctr, cpc, cpm, spend, orders, order_sum, atbs, shks, sum_price)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       views = VALUES(views),
       clicks = VALUES(clicks),
@@ -81,6 +85,7 @@ export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void>
   `;
 
   await execute(sql, [
+    cabinetId,
     stats.advertId,
     new Date(stats.date),
     stats.views ?? 0,
@@ -97,22 +102,23 @@ export async function upsertCampaignStats(stats: WBCampaignStats): Promise<void>
   ]);
 }
 
-export async function upsertCampaignStatsBatch(statsList: WBCampaignStats[]): Promise<number> {
+export async function upsertCampaignStatsBatch(cabinetId: number, statsList: WBCampaignStats[]): Promise<number> {
   let count = 0;
   for (const stats of statsList) {
-    await upsertCampaignStats(stats);
+    await upsertCampaignStats(cabinetId, stats);
     count++;
   }
   return count;
 }
 
 export async function getCampaignStats(
+  cabinetId: number,
   campaignId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<DBCampaignStats[]> {
-  let sql = 'SELECT * FROM campaign_stats WHERE campaign_id = ?';
-  const params: any[] = [campaignId];
+  let sql = 'SELECT * FROM campaign_stats WHERE cabinet_id = ? AND campaign_id = ?';
+  const params: any[] = [cabinetId, campaignId];
 
   if (dateFrom) {
     sql += ' AND date >= ?';
@@ -129,24 +135,24 @@ export async function getCampaignStats(
 
 // === CAMPAIGN PRODUCTS ===
 
-export async function upsertCampaignProduct(campaignId: number, nmId: number): Promise<void> {
+export async function upsertCampaignProduct(cabinetId: number, campaignId: number, nmId: number): Promise<void> {
   await execute(`
-    INSERT INTO campaign_products (campaign_id, nm_id)
-    VALUES (?, ?)
+    INSERT INTO campaign_products (cabinet_id, campaign_id, nm_id)
+    VALUES (?, ?, ?)
     ON DUPLICATE KEY UPDATE synced_at = NOW()
-  `, [campaignId, nmId]);
+  `, [cabinetId, campaignId, nmId]);
 }
 
-export async function getCampaignProducts(campaignId: number): Promise<{ nm_id: number }[]> {
+export async function getCampaignProducts(cabinetId: number, campaignId: number): Promise<{ nm_id: number }[]> {
   return query<{ nm_id: number }[]>(
-    'SELECT nm_id FROM campaign_products WHERE campaign_id = ?',
-    [campaignId]
+    'SELECT nm_id FROM campaign_products WHERE cabinet_id = ? AND campaign_id = ?',
+    [cabinetId, campaignId]
   );
 }
 
 // === PRODUCTS ===
 
-export async function upsertProduct(product: {
+export async function upsertProduct(cabinetId: number, product: {
   nmId: number;
   vendorCode?: string;
   brand?: string;
@@ -159,8 +165,8 @@ export async function upsertProduct(product: {
   feedbacks?: number;
 }): Promise<void> {
   const sql = `
-    INSERT INTO products (nm_id, vendor_code, brand, subject, name, price, discount, final_price, rating, feedbacks)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO products (cabinet_id, nm_id, vendor_code, brand, subject, name, price, discount, final_price, rating, feedbacks)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       vendor_code = COALESCE(VALUES(vendor_code), vendor_code),
       brand = COALESCE(VALUES(brand), brand),
@@ -174,6 +180,7 @@ export async function upsertProduct(product: {
   `;
 
   await execute(sql, [
+    cabinetId,
     product.nmId,
     product.vendorCode || null,
     product.brand || null,
@@ -187,14 +194,17 @@ export async function upsertProduct(product: {
   ]);
 }
 
-export async function getProducts(): Promise<DBProduct[]> {
-  return query<DBProduct[]>('SELECT * FROM products ORDER BY nm_id DESC');
+export async function getProducts(cabinetId: number): Promise<DBProduct[]> {
+  return query<DBProduct[]>(
+    'SELECT * FROM products WHERE cabinet_id = ? ORDER BY nm_id DESC',
+    [cabinetId]
+  );
 }
 
-export async function getProductById(nmId: number): Promise<DBProduct | null> {
+export async function getProductById(cabinetId: number, nmId: number): Promise<DBProduct | null> {
   const rows = await query<DBProduct[]>(
-    'SELECT * FROM products WHERE nm_id = ?',
-    [nmId]
+    'SELECT * FROM products WHERE cabinet_id = ? AND nm_id = ?',
+    [cabinetId, nmId]
   );
   return rows[0] || null;
 }
@@ -202,11 +212,12 @@ export async function getProductById(nmId: number): Promise<DBProduct | null> {
 // === PRODUCT ANALYTICS ===
 
 export async function upsertProductAnalytics(
+  cabinetId: number,
   analytics: WBProductAnalytics,
   date: string
 ): Promise<void> {
-  // Сначала убедимся, что продукт существует
-  await upsertProduct({
+  // Ensure product exists
+  await upsertProduct(cabinetId, {
     nmId: analytics.nmID,
     vendorCode: analytics.vendorCode,
     brand: analytics.brandName,
@@ -226,9 +237,9 @@ export async function upsertProductAnalytics(
 
   const sql = `
     INSERT INTO product_analytics
-      (nm_id, date, open_card_count, add_to_cart_count, orders_count, orders_sum,
+      (cabinet_id, nm_id, date, open_card_count, add_to_cart_count, orders_count, orders_sum,
        buyouts_count, buyouts_sum, cancel_count, cancel_sum, conversion_to_cart, conversion_to_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       open_card_count = VALUES(open_card_count),
       add_to_cart_count = VALUES(add_to_cart_count),
@@ -243,6 +254,7 @@ export async function upsertProductAnalytics(
   `;
 
   await execute(sql, [
+    cabinetId,
     analytics.nmID,
     date,
     stats.openCardCount ?? 0,
@@ -259,12 +271,13 @@ export async function upsertProductAnalytics(
 }
 
 export async function getProductAnalytics(
+  cabinetId: number,
   nmId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<DBProductAnalytics[]> {
-  let sql = 'SELECT * FROM product_analytics WHERE nm_id = ?';
-  const params: any[] = [nmId];
+  let sql = 'SELECT * FROM product_analytics WHERE cabinet_id = ? AND nm_id = ?';
+  const params: any[] = [cabinetId, nmId];
 
   if (dateFrom) {
     sql += ' AND date >= ?';
@@ -282,34 +295,34 @@ export async function getProductAnalytics(
 // === BIDS ===
 
 export async function saveBids(
+  cabinetId: number,
   campaignId: number,
   bids: { keyword: string; bid: number; position: number; cpm: number }[]
 ): Promise<number> {
-  // Удаляем старые ставки
-  await execute('DELETE FROM bids WHERE campaign_id = ?', [campaignId]);
+  await execute('DELETE FROM bids WHERE cabinet_id = ? AND campaign_id = ?', [cabinetId, campaignId]);
 
-  // Вставляем новые
   let count = 0;
   for (const bid of bids) {
     await execute(
-      'INSERT INTO bids (campaign_id, keyword, bid, position, cpm) VALUES (?, ?, ?, ?, ?)',
-      [campaignId, bid.keyword ?? null, bid.bid ?? 0, bid.position ?? 0, bid.cpm ?? 0]
+      'INSERT INTO bids (cabinet_id, campaign_id, keyword, bid, position, cpm) VALUES (?, ?, ?, ?, ?, ?)',
+      [cabinetId, campaignId, bid.keyword ?? null, bid.bid ?? 0, bid.position ?? 0, bid.cpm ?? 0]
     );
     count++;
   }
   return count;
 }
 
-export async function getBids(campaignId: number): Promise<any[]> {
+export async function getBids(cabinetId: number, campaignId: number): Promise<any[]> {
   return query<any[]>(
-    'SELECT * FROM bids WHERE campaign_id = ? ORDER BY position ASC',
-    [campaignId]
+    'SELECT * FROM bids WHERE cabinet_id = ? AND campaign_id = ? ORDER BY position ASC',
+    [cabinetId, campaignId]
   );
 }
 
 // === SUMMARIES ===
 
 export async function getDailySummary(
+  cabinetId: number,
   dateFrom?: string,
   dateTo?: string
 ): Promise<DailySummary[]> {
@@ -325,9 +338,9 @@ export async function getDailySummary(
       SUM(order_sum) as total_order_sum,
       ROUND(SUM(order_sum) / NULLIF(SUM(spend), 0), 2) as roas
     FROM campaign_stats
-    WHERE 1=1
+    WHERE cabinet_id = ?
   `;
-  const params: any[] = [];
+  const params: any[] = [cabinetId];
 
   if (dateFrom) {
     sql += ' AND date >= ?';
@@ -343,6 +356,7 @@ export async function getDailySummary(
 }
 
 export async function getAnalyticsSummary(
+  cabinetId: number,
   dateFrom: string,
   dateTo: string
 ): Promise<AnalyticsSummary> {
@@ -357,11 +371,12 @@ export async function getAnalyticsSummary(
       ROUND(AVG(cs.cpc), 2) as avgCPC,
       ROUND(SUM(cs.order_sum) / NULLIF(SUM(cs.spend), 0), 2) as roas
     FROM campaigns c
-    LEFT JOIN campaign_stats cs ON c.campaign_id = cs.campaign_id
+    LEFT JOIN campaign_stats cs ON c.campaign_id = cs.campaign_id AND cs.cabinet_id = c.cabinet_id
       AND cs.date BETWEEN ? AND ?
+    WHERE c.cabinet_id = ?
   `;
 
-  const rows = await query<any[]>(sql, [dateFrom, dateTo]);
+  const rows = await query<any[]>(sql, [dateFrom, dateTo, cabinetId]);
   const row = rows[0] || {};
 
   return {
@@ -381,11 +396,12 @@ export async function getAnalyticsSummary(
 
 export async function createImportRecord(
   importType: string,
-  fileName?: string
+  fileName?: string,
+  cabinetId?: number
 ): Promise<number> {
   const result = await execute(
-    'INSERT INTO import_history (import_type, file_name, status) VALUES (?, ?, ?)',
-    [importType, fileName ?? null, 'pending']
+    'INSERT INTO import_history (cabinet_id, import_type, file_name, status) VALUES (?, ?, ?, ?)',
+    [cabinetId ?? null, importType, fileName ?? null, 'pending']
   );
   return result.insertId;
 }
@@ -404,7 +420,13 @@ export async function updateImportRecord(
   );
 }
 
-export async function getImportHistory(limit = 50): Promise<any[]> {
+export async function getImportHistory(cabinetId?: number, limit = 50): Promise<any[]> {
+  if (cabinetId) {
+    return query<any[]>(
+      'SELECT * FROM import_history WHERE cabinet_id = ? ORDER BY started_at DESC LIMIT ?',
+      [cabinetId, limit]
+    );
+  }
   return query<any[]>(
     'SELECT * FROM import_history ORDER BY started_at DESC LIMIT ?',
     [limit]

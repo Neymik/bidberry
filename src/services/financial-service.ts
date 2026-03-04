@@ -1,10 +1,9 @@
-import { getWBClient } from '../api/wb-client';
 import * as financialRepo from '../db/financial-repository';
 import * as repo from '../db/repository';
+import type { WBApiClient } from '../api/wb-client';
 import type { PnLSummary, UnitEconomics, DBSalesReport, DBProductCost } from '../types';
 
-export async function syncSalesReport(dateFrom: string, dateTo: string): Promise<number> {
-  const wbClient = getWBClient();
+export async function syncSalesReport(cabinetId: number, wbClient: WBApiClient, dateFrom: string, dateTo: string): Promise<number> {
   const report = await wbClient.getSalesReport(dateFrom, dateTo);
 
   let count = 0;
@@ -18,8 +17,8 @@ export async function syncSalesReport(dateFrom: string, dateTo: string): Promise
       const revenue = Math.abs(item.finishedPrice ?? item.retail_amount ?? 0);
       const forPay = Math.abs(item.forPay ?? item.ppvz_for_pay ?? 0);
 
-      await repo.upsertProduct({ nmId });
-      await financialRepo.upsertSalesReport({
+      await repo.upsertProduct(cabinetId, { nmId });
+      await financialRepo.upsertSalesReport(cabinetId, {
         nm_id: nmId,
         date: item.date || item.sale_dt || dateFrom,
         quantity: isReturn ? 0 : 1,
@@ -42,19 +41,19 @@ export async function syncSalesReport(dateFrom: string, dateTo: string): Promise
   return count;
 }
 
-export async function getPnL(dateFrom?: string, dateTo?: string): Promise<PnLSummary[]> {
-  return financialRepo.getPnLSummary(dateFrom, dateTo);
+export async function getPnL(cabinetId: number, dateFrom?: string, dateTo?: string): Promise<PnLSummary[]> {
+  return financialRepo.getPnLSummary(cabinetId, dateFrom, dateTo);
 }
 
-export async function getProductPnL(nmId: number, dateFrom?: string, dateTo?: string): Promise<PnLSummary | null> {
-  return financialRepo.getPnLForProduct(nmId, dateFrom, dateTo);
+export async function getProductPnL(cabinetId: number, nmId: number, dateFrom?: string, dateTo?: string): Promise<PnLSummary | null> {
+  return financialRepo.getPnLForProduct(cabinetId, nmId, dateFrom, dateTo);
 }
 
-export async function getUnitEconomics(nmId: number): Promise<UnitEconomics | null> {
-  return financialRepo.getUnitEconomics(nmId);
+export async function getUnitEconomics(cabinetId: number, nmId: number): Promise<UnitEconomics | null> {
+  return financialRepo.getUnitEconomics(cabinetId, nmId);
 }
 
-export async function updateProductCosts(nmId: number, costs: {
+export async function updateProductCosts(cabinetId: number, nmId: number, costs: {
   cost_price?: number;
   logistics_cost?: number;
   commission_pct?: number;
@@ -62,13 +61,13 @@ export async function updateProductCosts(nmId: number, costs: {
   packaging_cost?: number;
   additional_cost?: number;
 }): Promise<void> {
-  return financialRepo.upsertProductCosts(nmId, costs);
+  return financialRepo.upsertProductCosts(cabinetId, nmId, costs);
 }
 
-export async function getProductCosts(nmId: number): Promise<DBProductCost | null> {
-  return financialRepo.getProductCosts(nmId);
+export async function getProductCosts(cabinetId: number, nmId: number): Promise<DBProductCost | null> {
+  return financialRepo.getProductCosts(cabinetId, nmId);
 }
 
-export async function getSalesReports(nmId: number, dateFrom?: string, dateTo?: string): Promise<DBSalesReport[]> {
-  return financialRepo.getSalesReports(nmId, dateFrom, dateTo);
+export async function getSalesReports(cabinetId: number, nmId: number, dateFrom?: string, dateTo?: string): Promise<DBSalesReport[]> {
+  return financialRepo.getSalesReports(cabinetId, nmId, dateFrom, dateTo);
 }

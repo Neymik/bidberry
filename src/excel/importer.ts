@@ -16,9 +16,10 @@ interface ImportResult {
 // === ИМПОРТ КАМПАНИЙ ИЗ EXCEL ===
 
 export async function importCampaignsFromExcel(
+  cabinetId: number,
   filePath: string
 ): Promise<ImportResult> {
-  const importId = await createImportRecord('campaigns', filePath);
+  const importId = await createImportRecord('campaigns', filePath, cabinetId);
   const errors: string[] = [];
   let recordsImported = 0;
 
@@ -33,7 +34,7 @@ export async function importCampaignsFromExcel(
       try {
         const campaign = mapRowToCampaign(row);
         if (campaign) {
-          await upsertCampaign(campaign);
+          await upsertCampaign(cabinetId, campaign);
           recordsImported++;
         }
       } catch (err: any) {
@@ -58,9 +59,10 @@ export async function importCampaignsFromExcel(
 // === ИМПОРТ ТОВАРОВ ИЗ EXCEL ===
 
 export async function importProductsFromExcel(
+  cabinetId: number,
   filePath: string
 ): Promise<ImportResult> {
-  const importId = await createImportRecord('products', filePath);
+  const importId = await createImportRecord('products', filePath, cabinetId);
   const errors: string[] = [];
   let recordsImported = 0;
 
@@ -75,7 +77,7 @@ export async function importProductsFromExcel(
       try {
         const product = mapRowToProduct(row);
         if (product) {
-          await upsertProduct(product);
+          await upsertProduct(cabinetId, product);
           recordsImported++;
         }
       } catch (err: any) {

@@ -1,6 +1,7 @@
 import { createHmac, createHash } from 'crypto';
 import jwt from 'jsonwebtoken';
 import * as usersRepo from '../db/users-repository';
+import * as cabinetsRepo from '../db/cabinets-repository';
 import type { DBUser } from '../db/users-repository';
 
 export interface TelegramAuthData {
@@ -28,8 +29,6 @@ export interface AuthResponse {
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || '24h';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-
-const ALLOWED_USERNAMES = ['tNeymik', 'Ropejamp'];
 
 export function verifyTelegramAuth(data: TelegramAuthData): boolean {
   if (!TELEGRAM_BOT_TOKEN) return false;
@@ -62,8 +61,8 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
     throw new Error('Telegram auth data expired');
   }
 
-  // Whitelist check
-  if (!data.username || !ALLOWED_USERNAMES.includes(data.username)) {
+  // Whitelist check via DB
+  if (!data.username || !(await cabinetsRepo.isUserAllowed(data.username))) {
     throw new Error('Access denied: your account is not whitelisted');
   }
 
@@ -85,6 +84,16 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
       last_name: data.last_name,
       photo_url: data.photo_url,
     });
+  }
+
+  // Auto-create default account+cabinet association if user has none
+  const accounts = await cabinetsRepo.getAccountsForUser(user.id);
+  if (accounts.length === 0) {
+    // Find first available account (or create one)
+    const allAccounts = await cabinetsRepo.getAllAccounts();
+    if (allAccounts.length > 0) {
+      await cabinetsRepo.addUserToAccount(user.id, allAccounts[0].id, 'member');
+    }
   }
 
   return generateAuthResponse(user);

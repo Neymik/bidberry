@@ -3,34 +3,35 @@ import type { DBBidRule, DBBidHistory, BidRuleInput } from '../types';
 
 // === BID RULES ===
 
-export async function getBidRules(campaignId: number): Promise<DBBidRule[]> {
+export async function getBidRules(cabinetId: number, campaignId: number): Promise<DBBidRule[]> {
   return query<DBBidRule[]>(
-    'SELECT * FROM bid_rules WHERE campaign_id = ? ORDER BY created_at DESC',
-    [campaignId]
+    'SELECT * FROM bid_rules WHERE cabinet_id = ? AND campaign_id = ? ORDER BY created_at DESC',
+    [cabinetId, campaignId]
   );
 }
 
-export async function getActiveBidRules(): Promise<DBBidRule[]> {
+export async function getActiveBidRules(cabinetId: number): Promise<DBBidRule[]> {
   return query<DBBidRule[]>(
-    'SELECT * FROM bid_rules WHERE is_active = TRUE ORDER BY campaign_id'
+    'SELECT * FROM bid_rules WHERE cabinet_id = ? AND is_active = TRUE ORDER BY campaign_id',
+    [cabinetId]
   );
 }
 
-export async function getBidRuleById(ruleId: number): Promise<DBBidRule | null> {
-  const rows = await query<DBBidRule[]>('SELECT * FROM bid_rules WHERE id = ?', [ruleId]);
+export async function getBidRuleById(cabinetId: number, ruleId: number): Promise<DBBidRule | null> {
+  const rows = await query<DBBidRule[]>('SELECT * FROM bid_rules WHERE cabinet_id = ? AND id = ?', [cabinetId, ruleId]);
   return rows[0] || null;
 }
 
-export async function createBidRule(input: BidRuleInput): Promise<number> {
+export async function createBidRule(cabinetId: number, input: BidRuleInput): Promise<number> {
   const result = await execute(
-    `INSERT INTO bid_rules (campaign_id, keyword, strategy, target_value, min_bid, max_bid, step)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [input.campaign_id, input.keyword || null, input.strategy, input.target_value, input.min_bid ?? 50, input.max_bid ?? 1000, input.step ?? 10]
+    `INSERT INTO bid_rules (cabinet_id, campaign_id, keyword, strategy, target_value, min_bid, max_bid, step)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [cabinetId, input.campaign_id, input.keyword || null, input.strategy, input.target_value, input.min_bid ?? 50, input.max_bid ?? 1000, input.step ?? 10]
   );
   return result.insertId;
 }
 
-export async function updateBidRule(ruleId: number, updates: Partial<BidRuleInput> & { is_active?: boolean }): Promise<void> {
+export async function updateBidRule(cabinetId: number, ruleId: number, updates: Partial<BidRuleInput> & { is_active?: boolean }): Promise<void> {
   const fields: string[] = [];
   const params: any[] = [];
 
@@ -44,17 +45,17 @@ export async function updateBidRule(ruleId: number, updates: Partial<BidRuleInpu
 
   if (fields.length === 0) return;
 
-  params.push(ruleId);
-  await execute(`UPDATE bid_rules SET ${fields.join(', ')} WHERE id = ?`, params);
+  params.push(cabinetId, ruleId);
+  await execute(`UPDATE bid_rules SET ${fields.join(', ')} WHERE cabinet_id = ? AND id = ?`, params);
 }
 
-export async function deleteBidRule(ruleId: number): Promise<void> {
-  await execute('DELETE FROM bid_rules WHERE id = ?', [ruleId]);
+export async function deleteBidRule(cabinetId: number, ruleId: number): Promise<void> {
+  await execute('DELETE FROM bid_rules WHERE cabinet_id = ? AND id = ?', [cabinetId, ruleId]);
 }
 
 // === BID HISTORY ===
 
-export async function addBidHistoryEntry(entry: {
+export async function addBidHistoryEntry(cabinetId: number, entry: {
   campaign_id: number;
   keyword?: string;
   old_bid: number;
@@ -63,14 +64,14 @@ export async function addBidHistoryEntry(entry: {
   rule_id?: number;
 }): Promise<void> {
   await execute(
-    'INSERT INTO bid_history (campaign_id, keyword, old_bid, new_bid, reason, rule_id) VALUES (?, ?, ?, ?, ?, ?)',
-    [entry.campaign_id, entry.keyword || null, entry.old_bid, entry.new_bid, entry.reason, entry.rule_id || null]
+    'INSERT INTO bid_history (cabinet_id, campaign_id, keyword, old_bid, new_bid, reason, rule_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [cabinetId, entry.campaign_id, entry.keyword || null, entry.old_bid, entry.new_bid, entry.reason, entry.rule_id || null]
   );
 }
 
-export async function getBidHistory(campaignId: number, limit = 100): Promise<DBBidHistory[]> {
+export async function getBidHistory(cabinetId: number, campaignId: number, limit = 100): Promise<DBBidHistory[]> {
   return query<DBBidHistory[]>(
-    'SELECT * FROM bid_history WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?',
-    [campaignId, limit]
+    'SELECT * FROM bid_history WHERE cabinet_id = ? AND campaign_id = ? ORDER BY created_at DESC LIMIT ?',
+    [cabinetId, campaignId, limit]
   );
 }

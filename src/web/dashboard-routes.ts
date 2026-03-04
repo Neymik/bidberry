@@ -4,7 +4,7 @@ import { z } from 'zod';
 import dayjs from 'dayjs';
 import * as repo from '../db/repository';
 import { checkConnection } from '../db/connection';
-import { getWBClient } from '../api/wb-client';
+import { getCabinetId, getWBClientFromContext } from './cabinet-context';
 
 const app = new Hono();
 
@@ -15,8 +15,11 @@ const dateRangeSchema = z.object({
 
 app.get('/api/health', async (c) => {
   const dbConnected = await checkConnection();
-  const wbClient = getWBClient();
-  const wbConnected = await wbClient.checkConnection();
+  let wbConnected = false;
+  try {
+    const wbClient = getWBClientFromContext(c);
+    wbConnected = await wbClient.checkConnection();
+  } catch { /* no cabinet selected */ }
   return c.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -28,14 +31,15 @@ app.get('/api/health', async (c) => {
 });
 
 app.get('/api/dashboard', zValidator('query', dateRangeSchema), async (c) => {
+  const cabinetId = getCabinetId(c);
   const { dateFrom, dateTo } = c.req.valid('query');
   const from = dateFrom || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
   const to = dateTo || dayjs().format('YYYY-MM-DD');
   try {
     const [summary, dailyStats, campaigns] = await Promise.all([
-      repo.getAnalyticsSummary(from, to),
-      repo.getDailySummary(from, to),
-      repo.getCampaigns(),
+      repo.getAnalyticsSummary(cabinetId, from, to),
+      repo.getDailySummary(cabinetId, from, to),
+      repo.getCampaigns(cabinetId),
     ]);
     return c.json({ summary, dailyStats, campaigns, period: { from, to } });
   } catch (error: any) {
@@ -45,7 +49,7 @@ app.get('/api/dashboard', zValidator('query', dateRangeSchema), async (c) => {
 
 app.get('/api/wb/balance', async (c) => {
   try {
-    const wbClient = getWBClient();
+    const wbClient = getWBClientFromContext(c);
     const balance = await wbClient.getBalance();
     return c.json(balance);
   } catch (error: any) {

@@ -1,6 +1,6 @@
 import { query, execute } from './connection';
 
-export async function upsertPromoParticipation(data: {
+export async function upsertPromoParticipation(cabinetId: number, data: {
   nm_id: number;
   promo_id: number;
   promo_name: string;
@@ -11,8 +11,8 @@ export async function upsertPromoParticipation(data: {
 }): Promise<void> {
   await execute(`
     INSERT INTO promotion_participation
-      (nm_id, promo_id, promo_name, promo_type, start_date, end_date, is_participating)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+      (cabinet_id, nm_id, promo_id, promo_name, promo_type, start_date, end_date, is_participating)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       promo_name = VALUES(promo_name),
       promo_type = VALUES(promo_type),
@@ -21,6 +21,7 @@ export async function upsertPromoParticipation(data: {
       is_participating = VALUES(is_participating),
       synced_at = NOW()
   `, [
+    cabinetId,
     data.nm_id,
     data.promo_id,
     data.promo_name ?? null,
@@ -31,26 +32,27 @@ export async function upsertPromoParticipation(data: {
   ]);
 }
 
-export async function getPromosByNmId(nmId: number): Promise<any[]> {
+export async function getPromosByNmId(cabinetId: number, nmId: number): Promise<any[]> {
   return query<any[]>(
-    'SELECT * FROM promotion_participation WHERE nm_id = ? ORDER BY start_date DESC',
-    [nmId]
+    'SELECT * FROM promotion_participation WHERE cabinet_id = ? AND nm_id = ? ORDER BY start_date DESC',
+    [cabinetId, nmId]
   );
 }
 
-export async function getActivePromos(): Promise<any[]> {
+export async function getActivePromos(cabinetId: number): Promise<any[]> {
   return query<any[]>(
     `SELECT * FROM promotion_participation
-     WHERE is_participating = 1
-     ORDER BY start_date DESC`
-  );
-}
-
-export async function getActivePromosByNmId(nmId: number): Promise<any[]> {
-  return query<any[]>(
-    `SELECT * FROM promotion_participation
-     WHERE nm_id = ? AND is_participating = 1
+     WHERE cabinet_id = ? AND is_participating = 1
      ORDER BY start_date DESC`,
-    [nmId]
+    [cabinetId]
+  );
+}
+
+export async function getActivePromosByNmId(cabinetId: number, nmId: number): Promise<any[]> {
+  return query<any[]>(
+    `SELECT * FROM promotion_participation
+     WHERE cabinet_id = ? AND nm_id = ? AND is_participating = 1
+     ORDER BY start_date DESC`,
+    [cabinetId, nmId]
   );
 }

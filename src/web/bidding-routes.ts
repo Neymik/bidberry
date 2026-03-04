@@ -3,6 +3,7 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import * as smartBidder from '../services/smart-bidder';
 import * as scheduler from '../services/scheduler';
+import { getCabinetId, getWBClientFromContext } from './cabinet-context';
 
 const app = new Hono();
 
@@ -17,9 +18,10 @@ const bidRuleSchema = z.object({
 });
 
 app.get('/api/campaigns/:id/bid-rules', async (c) => {
+  const cabinetId = getCabinetId(c);
   const id = parseInt(c.req.param('id'));
   try {
-    const rules = await smartBidder.getRules(id);
+    const rules = await smartBidder.getRules(cabinetId, id);
     return c.json(rules);
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -27,10 +29,11 @@ app.get('/api/campaigns/:id/bid-rules', async (c) => {
 });
 
 app.post('/api/campaigns/:id/bid-rules', zValidator('json', bidRuleSchema.omit({ campaign_id: true })), async (c) => {
+  const cabinetId = getCabinetId(c);
   const campaignId = parseInt(c.req.param('id'));
   const input = c.req.valid('json');
   try {
-    const ruleId = await smartBidder.createRule({ ...input, campaign_id: campaignId });
+    const ruleId = await smartBidder.createRule(cabinetId, { ...input, campaign_id: campaignId });
     return c.json({ success: true, ruleId });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -46,10 +49,11 @@ app.put('/api/bid-rules/:ruleId', zValidator('json', z.object({
   is_active: z.boolean().optional(),
   keyword: z.string().optional(),
 })), async (c) => {
+  const cabinetId = getCabinetId(c);
   const ruleId = parseInt(c.req.param('ruleId'));
   const updates = c.req.valid('json');
   try {
-    await smartBidder.updateRule(ruleId, updates);
+    await smartBidder.updateRule(cabinetId, ruleId, updates);
     return c.json({ success: true });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -57,9 +61,10 @@ app.put('/api/bid-rules/:ruleId', zValidator('json', z.object({
 });
 
 app.delete('/api/bid-rules/:ruleId', async (c) => {
+  const cabinetId = getCabinetId(c);
   const ruleId = parseInt(c.req.param('ruleId'));
   try {
-    await smartBidder.deleteRule(ruleId);
+    await smartBidder.deleteRule(cabinetId, ruleId);
     return c.json({ success: true });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -67,9 +72,10 @@ app.delete('/api/bid-rules/:ruleId', async (c) => {
 });
 
 app.get('/api/campaigns/:id/bid-history', async (c) => {
+  const cabinetId = getCabinetId(c);
   const id = parseInt(c.req.param('id'));
   try {
-    const history = await smartBidder.getBidHistory(id);
+    const history = await smartBidder.getBidHistory(cabinetId, id);
     return c.json(history);
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -77,9 +83,11 @@ app.get('/api/campaigns/:id/bid-history', async (c) => {
 });
 
 app.post('/api/campaigns/:id/adjust-bids', async (c) => {
+  const cabinetId = getCabinetId(c);
+  const wbClient = getWBClientFromContext(c);
   const id = parseInt(c.req.param('id'));
   try {
-    const result = await smartBidder.adjustBidsForCampaign(id);
+    const result = await smartBidder.adjustBidsForCampaign(cabinetId, wbClient, id);
     return c.json({ success: true, ...result });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
@@ -87,8 +95,10 @@ app.post('/api/campaigns/:id/adjust-bids', async (c) => {
 });
 
 app.post('/api/smart-bidder/run', async (c) => {
+  const cabinetId = getCabinetId(c);
+  const wbClient = getWBClientFromContext(c);
   try {
-    const result = await smartBidder.runAllRules();
+    const result = await smartBidder.runAllRules(cabinetId, wbClient);
     return c.json({ success: true, ...result });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);

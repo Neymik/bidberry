@@ -1,12 +1,12 @@
 import { query, execute } from './connection';
 import type { DBOrder, WBOrder } from '../types';
 
-export async function upsertOrder(order: WBOrder): Promise<void> {
+export async function upsertOrder(cabinetId: number, order: WBOrder): Promise<void> {
   const sql = `
-    INSERT INTO orders (order_id, nm_id, srid, date_created, date_updated, warehouse_name, region,
+    INSERT INTO orders (cabinet_id, order_id, nm_id, srid, date_created, date_updated, warehouse_name, region,
       price, converted_price, discount_percent, spp, finished_price, price_with_disc,
       size, brand, subject, category, status, cancel_dt, is_cancel, sticker, gn_number)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       date_updated = VALUES(date_updated),
       status = VALUES(status),
@@ -20,6 +20,7 @@ export async function upsertOrder(order: WBOrder): Promise<void> {
   const orderId = order.srid ? parseInt(order.srid.replace(/\D/g, '').slice(0, 15) || '0') : order.incomeID;
 
   await execute(sql, [
+    cabinetId,
     orderId,
     order.nmId,
     order.srid || null,
@@ -45,11 +46,11 @@ export async function upsertOrder(order: WBOrder): Promise<void> {
   ]);
 }
 
-export async function upsertOrdersBatch(orders: WBOrder[]): Promise<number> {
+export async function upsertOrdersBatch(cabinetId: number, orders: WBOrder[]): Promise<number> {
   let count = 0;
   for (const order of orders) {
     try {
-      await upsertOrder(order);
+      await upsertOrder(cabinetId, order);
       count++;
     } catch (e) {
       // Skip duplicates/errors
@@ -59,13 +60,14 @@ export async function upsertOrdersBatch(orders: WBOrder[]): Promise<number> {
 }
 
 export async function getOrders(
+  cabinetId: number,
   dateFrom?: string,
   dateTo?: string,
   nmId?: number,
   limit = 500
 ): Promise<DBOrder[]> {
-  let sql = 'SELECT *, DATEDIFF(date_updated, date_created) AS delivery_days FROM orders WHERE 1=1';
-  const params: any[] = [];
+  let sql = 'SELECT *, DATEDIFF(date_updated, date_created) AS delivery_days FROM orders WHERE cabinet_id = ?';
+  const params: any[] = [cabinetId];
 
   if (dateFrom) {
     sql += ' AND date_created >= ?';
@@ -87,6 +89,7 @@ export async function getOrders(
 }
 
 export async function getOrderStats(
+  cabinetId: number,
   dateFrom?: string,
   dateTo?: string,
   nmId?: number
@@ -102,9 +105,9 @@ export async function getOrderStats(
       COALESCE(SUM(price_with_disc), 0) as total_sum,
       SUM(CASE WHEN is_cancel = 1 THEN 1 ELSE 0 END) as cancelled_count,
       COALESCE(SUM(CASE WHEN is_cancel = 1 THEN price_with_disc ELSE 0 END), 0) as cancelled_sum
-    FROM orders WHERE 1=1
+    FROM orders WHERE cabinet_id = ?
   `;
-  const params: any[] = [];
+  const params: any[] = [cabinetId];
 
   if (dateFrom) {
     sql += ' AND date_created >= ?';

@@ -1,32 +1,31 @@
-import { getWBClient } from '../api/wb-client';
 import * as biddingRepo from '../db/bidding-repository';
 import * as repo from '../db/repository';
+import type { WBApiClient } from '../api/wb-client';
 import type { DBBidRule, BidRuleInput } from '../types';
 
-export async function createRule(input: BidRuleInput): Promise<number> {
-  return biddingRepo.createBidRule(input);
+export async function createRule(cabinetId: number, input: BidRuleInput): Promise<number> {
+  return biddingRepo.createBidRule(cabinetId, input);
 }
 
-export async function updateRule(ruleId: number, updates: Partial<BidRuleInput> & { is_active?: boolean }): Promise<void> {
-  return biddingRepo.updateBidRule(ruleId, updates);
+export async function updateRule(cabinetId: number, ruleId: number, updates: Partial<BidRuleInput> & { is_active?: boolean }): Promise<void> {
+  return biddingRepo.updateBidRule(cabinetId, ruleId, updates);
 }
 
-export async function deleteRule(ruleId: number): Promise<void> {
-  return biddingRepo.deleteBidRule(ruleId);
+export async function deleteRule(cabinetId: number, ruleId: number): Promise<void> {
+  return biddingRepo.deleteBidRule(cabinetId, ruleId);
 }
 
-export async function getRules(campaignId: number): Promise<DBBidRule[]> {
-  return biddingRepo.getBidRules(campaignId);
+export async function getRules(cabinetId: number, campaignId: number): Promise<DBBidRule[]> {
+  return biddingRepo.getBidRules(cabinetId, campaignId);
 }
 
-export async function getBidHistory(campaignId: number): Promise<any[]> {
-  return biddingRepo.getBidHistory(campaignId);
+export async function getBidHistory(cabinetId: number, campaignId: number): Promise<any[]> {
+  return biddingRepo.getBidHistory(cabinetId, campaignId);
 }
 
-export async function adjustBidsForCampaign(campaignId: number): Promise<{ adjusted: number; errors: number }> {
-  const rules = await biddingRepo.getBidRules(campaignId);
+export async function adjustBidsForCampaign(cabinetId: number, wbClient: WBApiClient, campaignId: number): Promise<{ adjusted: number; errors: number }> {
+  const rules = await biddingRepo.getBidRules(cabinetId, campaignId);
   const activeRules = rules.filter(r => r.is_active);
-  const wbClient = getWBClient();
 
   let adjusted = 0;
   let errors = 0;
@@ -36,7 +35,7 @@ export async function adjustBidsForCampaign(campaignId: number): Promise<{ adjus
   const bidMap = new Map(currentBids.map(b => [b.keyword, b]));
 
   // Get campaign stats for DRR calculations
-  const stats = await repo.getCampaignStats(campaignId);
+  const stats = await repo.getCampaignStats(cabinetId, campaignId);
   const latestStats = stats[0];
 
   for (const rule of activeRules) {
@@ -51,7 +50,7 @@ export async function adjustBidsForCampaign(campaignId: number): Promise<{ adjus
       if (Math.abs(currentBid - newBid) < 1) continue; // Skip if difference is negligible
 
       await wbClient.setBid(campaignId, keyword, newBid);
-      await biddingRepo.addBidHistoryEntry({
+      await biddingRepo.addBidHistoryEntry(cabinetId, {
         campaign_id: campaignId,
         keyword,
         old_bid: currentBid,
@@ -121,8 +120,8 @@ function calculateNewBid(
   return Math.round(newBid);
 }
 
-export async function runAllRules(): Promise<{ campaigns: number; adjusted: number; errors: number }> {
-  const allRules = await biddingRepo.getActiveBidRules();
+export async function runAllRules(cabinetId: number, wbClient: WBApiClient): Promise<{ campaigns: number; adjusted: number; errors: number }> {
+  const allRules = await biddingRepo.getActiveBidRules(cabinetId);
 
   // Group by campaign
   const campaignIds = [...new Set(allRules.map(r => r.campaign_id))];
@@ -131,7 +130,7 @@ export async function runAllRules(): Promise<{ campaigns: number; adjusted: numb
   let totalErrors = 0;
 
   for (const campaignId of campaignIds) {
-    const result = await adjustBidsForCampaign(campaignId);
+    const result = await adjustBidsForCampaign(cabinetId, wbClient, campaignId);
     totalAdjusted += result.adjusted;
     totalErrors += result.errors;
   }

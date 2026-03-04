@@ -1,43 +1,40 @@
-import { getWBClient } from '../api/wb-client';
 import * as keywordRepo from '../db/keywords-repository';
+import type { WBApiClient } from '../api/wb-client';
 import type { DBKeywordCollection, DBKeywordPosition } from '../types';
 
-export async function getKeywordsForProduct(nmId: number): Promise<DBKeywordCollection[]> {
-  return keywordRepo.getKeywords(nmId);
+export async function getKeywordsForProduct(cabinetId: number, nmId: number): Promise<DBKeywordCollection[]> {
+  return keywordRepo.getKeywords(cabinetId, nmId);
 }
 
-export async function addKeyword(nmId: number, keyword: string, source = 'manual'): Promise<void> {
+export async function addKeyword(cabinetId: number, wbClient: WBApiClient, nmId: number, keyword: string, source = 'manual'): Promise<void> {
   // Try to get frequency from WB
   try {
-    const wbClient = getWBClient();
     const stats = await wbClient.getKeywordStats(keyword);
     const freq = stats[0]?.freq || 0;
-    await keywordRepo.addKeyword(nmId, keyword, freq, source);
+    await keywordRepo.addKeyword(cabinetId, nmId, keyword, freq, source);
   } catch {
-    await keywordRepo.addKeyword(nmId, keyword, 0, source);
+    await keywordRepo.addKeyword(cabinetId, nmId, keyword, 0, source);
   }
 }
 
-export async function removeKeyword(nmId: number, keyword: string): Promise<void> {
-  return keywordRepo.removeKeyword(nmId, keyword);
+export async function removeKeyword(cabinetId: number, nmId: number, keyword: string): Promise<void> {
+  return keywordRepo.removeKeyword(cabinetId, nmId, keyword);
 }
 
-export async function fetchRecommendedKeywords(nmId: number): Promise<string[]> {
-  const wbClient = getWBClient();
+export async function fetchRecommendedKeywords(wbClient: WBApiClient, nmId: number): Promise<string[]> {
   const keywords = await wbClient.getRecommendedKeywords(nmId);
   return keywords;
 }
 
-export async function addRecommendedKeywords(nmId: number): Promise<number> {
-  const keywords = await fetchRecommendedKeywords(nmId);
+export async function addRecommendedKeywords(cabinetId: number, wbClient: WBApiClient, nmId: number): Promise<number> {
+  const keywords = await fetchRecommendedKeywords(wbClient, nmId);
   const items = keywords.map(kw => ({ keyword: kw, source: 'recommended' }));
-  return keywordRepo.addKeywordsBatch(nmId, items);
+  return keywordRepo.addKeywordsBatch(cabinetId, nmId, items);
 }
 
-export async function checkPositions(nmId: number): Promise<void> {
-  const keywords = await keywordRepo.getKeywords(nmId);
+export async function checkPositions(cabinetId: number, wbClient: WBApiClient, nmId: number): Promise<void> {
+  const keywords = await keywordRepo.getKeywords(cabinetId, nmId);
   const tracked = keywords.filter(k => k.is_tracked);
-  const wbClient = getWBClient();
 
   for (const kw of tracked) {
     try {
@@ -45,7 +42,7 @@ export async function checkPositions(nmId: number): Promise<void> {
       const stat = stats[0];
       if (stat) {
         // Use frequency as a proxy - actual position tracking would need search API
-        await keywordRepo.saveKeywordPosition(nmId, kw.keyword, 0, 0, stat.freq);
+        await keywordRepo.saveKeywordPosition(cabinetId, nmId, kw.keyword, 0, 0, stat.freq);
       }
     } catch (error) {
       console.error(`Failed to check position for "${kw.keyword}":`, error);
@@ -53,8 +50,8 @@ export async function checkPositions(nmId: number): Promise<void> {
   }
 }
 
-export async function checkAllPositions(): Promise<{ checked: number; errors: number }> {
-  const allKeywords = await keywordRepo.getAllTrackedKeywords();
+export async function checkAllPositions(cabinetId: number, wbClient: WBApiClient): Promise<{ checked: number; errors: number }> {
+  const allKeywords = await keywordRepo.getAllTrackedKeywords(cabinetId);
   let checked = 0;
   let errors = 0;
 
@@ -68,7 +65,7 @@ export async function checkAllPositions(): Promise<{ checked: number; errors: nu
 
   for (const [nmId] of byProduct) {
     try {
-      await checkPositions(nmId);
+      await checkPositions(cabinetId, wbClient, nmId);
       checked++;
     } catch {
       errors++;
@@ -78,10 +75,10 @@ export async function checkAllPositions(): Promise<{ checked: number; errors: nu
   return { checked, errors };
 }
 
-export async function getPositionHistory(nmId: number, keyword: string): Promise<DBKeywordPosition[]> {
-  return keywordRepo.getKeywordPositions(nmId, keyword);
+export async function getPositionHistory(cabinetId: number, nmId: number, keyword: string): Promise<DBKeywordPosition[]> {
+  return keywordRepo.getKeywordPositions(cabinetId, nmId, keyword);
 }
 
-export async function searchKeywords(q: string): Promise<DBKeywordCollection[]> {
-  return keywordRepo.searchKeywords(q);
+export async function searchKeywords(cabinetId: number, q: string): Promise<DBKeywordCollection[]> {
+  return keywordRepo.searchKeywords(cabinetId, q);
 }

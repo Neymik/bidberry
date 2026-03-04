@@ -576,7 +576,31 @@ export class WBApiClient {
   }
 }
 
-// Singleton instance
+// === Client Factory (per-cabinet) ===
+
+const clientCache = new Map<number, WBApiClient>();
+
+/**
+ * Get a WB API client for a specific cabinet.
+ * Clients are cached by cabinetId for reuse.
+ */
+export function getWBClientForCabinet(cabinetId: number, apiKey: string): WBApiClient {
+  let client = clientCache.get(cabinetId);
+  if (!client) {
+    client = new WBApiClient(apiKey);
+    clientCache.set(cabinetId, client);
+  }
+  return client;
+}
+
+/**
+ * Invalidate cached client for a cabinet (e.g. when API key changes).
+ */
+export function invalidateCabinetClient(cabinetId: number): void {
+  clientCache.delete(cabinetId);
+}
+
+// Backward-compatible singleton (uses env WB_API_KEY)
 let clientInstance: WBApiClient | null = null;
 
 export function getWBClient(apiKey?: string): WBApiClient {

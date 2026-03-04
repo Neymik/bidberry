@@ -1,4 +1,4 @@
-import { getWBClient } from '../api/wb-client';
+import type { WBApiClient } from '../api/wb-client';
 import * as repo from '../db/repository';
 import * as searchRepo from '../db/search-repository';
 import dayjs from 'dayjs';
@@ -8,11 +8,12 @@ import dayjs from 'dayjs';
  * Uses WB /api/v2/search-report/product/search-texts endpoint.
  */
 export async function syncSearchQueries(
+  cabinetId: number,
+  wbClient: WBApiClient,
   dateFrom?: string,
   dateTo?: string
 ): Promise<number> {
-  const wbClient = getWBClient();
-  const products = await repo.getProducts();
+  const products = await repo.getProducts(cabinetId);
   if (products.length === 0) return 0;
 
   const from = dateFrom || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
@@ -34,7 +35,7 @@ export async function syncSearchQueries(
 
         const texts = product.searchTexts || product.texts || [];
         for (const text of texts) {
-          await searchRepo.upsertSearchQueryAnalytics({
+          await searchRepo.upsertSearchQueryAnalytics(cabinetId, {
             nm_id: nmId,
             keyword: text.text || text.keyword || text.query || '',
             date: from,
@@ -65,9 +66,11 @@ export async function syncSearchQueries(
  * Sync search cluster stats for all ad campaigns.
  * Uses WB /adv/v0/normquery/stats endpoint per campaign.
  */
-export async function syncSearchClusters(): Promise<number> {
-  const wbClient = getWBClient();
-  const campaigns = await repo.getCampaigns();
+export async function syncSearchClusters(
+  cabinetId: number,
+  wbClient: WBApiClient
+): Promise<number> {
+  const campaigns = await repo.getCampaigns(cabinetId);
   if (campaigns.length === 0) return 0;
 
   let totalSynced = 0;
@@ -82,7 +85,7 @@ export async function syncSearchClusters(): Promise<number> {
         const clusterName = cluster.cluster || cluster.keyword || cluster.name || '';
         if (!clusterName) continue;
 
-        await searchRepo.upsertSearchClusterStats({
+        await searchRepo.upsertSearchClusterStats(cabinetId, {
           campaign_id: campaign.campaign_id,
           cluster_name: clusterName,
           date: today,
