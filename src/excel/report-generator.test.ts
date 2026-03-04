@@ -223,62 +223,62 @@ mock.module('../db/connection', () => ({
 }));
 
 mock.module('../db/repository', () => ({
-  getProducts: mock(async () => mockData.products),
-  getProductById: mock(async (nmId: number) =>
+  getProducts: mock(async (_cabinetId: number) => mockData.products),
+  getProductById: mock(async (_cabinetId: number, nmId: number) =>
     mockData.products.find(p => p.nm_id === nmId) ?? null
   ),
-  getProductAnalytics: mock(async (nmId: number) =>
+  getProductAnalytics: mock(async (_cabinetId: number, nmId: number) =>
     mockData.analytics.filter(a => a.nm_id === nmId)
   ),
-  getCampaigns: mock(async () => mockData.campaigns),
-  getCampaignStats: mock(async (campaignId: number) =>
+  getCampaigns: mock(async (_cabinetId: number) => mockData.campaigns),
+  getCampaignStats: mock(async (_cabinetId: number, campaignId: number) =>
     mockData.campaignStats.filter(s => s.campaign_id === campaignId)
   ),
 }));
 
 mock.module('../db/orders-repository', () => ({
-  getOrders: mock(async (_dateFrom?: string, _dateTo?: string, nmId?: number) => {
+  getOrders: mock(async (_cabinetId: number, _dateFrom?: string, _dateTo?: string, nmId?: number) => {
     if (nmId) return mockData.orders.filter(o => o.nm_id === nmId);
     return mockData.orders;
   }),
 }));
 
 mock.module('../db/stock-repository', () => ({
-  getStocksByNmId: mock(async (nmId: number) =>
+  getStocksByNmId: mock(async (_cabinetId: number, nmId: number) =>
     mockData.stocks.filter(s => s.nm_id === nmId)
   ),
-  getStocksSummary: mock(async () => mockData.stocksSummary),
+  getStocksSummary: mock(async (_cabinetId: number) => mockData.stocksSummary),
 }));
 
 mock.module('../db/traffic-repository', () => ({
-  getTrafficSourcesByNmId: mock(async (nmId: number) =>
+  getTrafficSourcesByNmId: mock(async (_cabinetId: number, nmId: number) =>
     mockData.trafficSources.filter(s => s.nm_id === nmId)
   ),
-  getTrafficSourcesSummary: mock(async () => mockData.trafficSummary),
+  getTrafficSourcesSummary: mock(async (_cabinetId: number) => mockData.trafficSummary),
 }));
 
 mock.module('../db/events-repository', () => ({
-  getEventsByNmId: mock(async (nmId: number) =>
+  getEventsByNmId: mock(async (_cabinetId: number, nmId: number) =>
     mockData.events.filter(e => e.nm_id === nmId)
   ),
-  getAllEvents: mock(async () => mockData.events),
+  getAllEvents: mock(async (_cabinetId: number) => mockData.events),
 }));
 
 mock.module('../db/search-repository', () => ({
-  getSearchQuerySummary: mock(async (nmId: number) =>
+  getSearchQuerySummary: mock(async (_cabinetId: number, nmId: number) =>
     mockData.searchQuerySummary.filter(s => s.nm_id === nmId)
   ),
-  getAllSearchQuerySummary: mock(async () => mockData.searchQuerySummary),
+  getAllSearchQuerySummary: mock(async (_cabinetId: number) => mockData.searchQuerySummary),
 }));
 
 mock.module('../db/keywords-repository', () => ({
-  getKeywords: mock(async (nmId: number) =>
+  getKeywords: mock(async (_cabinetId: number, nmId: number) =>
     mockData.keywords.filter(k => k.nm_id === nmId)
   ),
-  getAllTrackedKeywords: mock(async () =>
+  getAllTrackedKeywords: mock(async (_cabinetId: number) =>
     mockData.keywords.filter(k => k.is_tracked)
   ),
-  getKeywordPositions: mock(async (nmId: number, keyword: string) =>
+  getKeywordPositions: mock(async (_cabinetId: number, nmId: number, keyword: string) =>
     mockData.keywordPositions.filter(p => p.nm_id === nmId && p.keyword === keyword)
   ),
 }));
@@ -327,7 +327,7 @@ describe('all-products report', () => {
 
   beforeAll(async () => {
     mockData = { ...ORIGINAL_MOCK_DATA };
-    filePath = await generatePerechenReport('2025-06-01', '2025-06-30');
+    filePath = await generatePerechenReport(1, '2025-06-01', '2025-06-30');
     generatedFiles.push(filePath);
     workbook = XLSX.readFile(filePath);
   });
@@ -421,7 +421,7 @@ describe('single-product report', () => {
 
   beforeAll(async () => {
     mockData = { ...ORIGINAL_MOCK_DATA };
-    filePath = await generatePerechenReport('2025-06-01', '2025-06-30', 100001);
+    filePath = await generatePerechenReport(1, '2025-06-01', '2025-06-30', 100001);
     generatedFiles.push(filePath);
     workbook = XLSX.readFile(filePath);
   });
@@ -484,7 +484,7 @@ describe('empty data', () => {
       searchQuerySummary: [],
     };
 
-    filePath = await generatePerechenReport('2025-06-01', '2025-06-30');
+    filePath = await generatePerechenReport(1, '2025-06-01', '2025-06-30');
     generatedFiles.push(filePath);
     workbook = XLSX.readFile(filePath);
   });
@@ -531,7 +531,7 @@ describe('calculated fields', () => {
 
   beforeAll(async () => {
     mockData = { ...ORIGINAL_MOCK_DATA };
-    const filePath = await generatePerechenReport('2025-06-01', '2025-06-30');
+    const filePath = await generatePerechenReport(1, '2025-06-01', '2025-06-30');
     generatedFiles.push(filePath);
     workbook = XLSX.readFile(filePath);
   });
