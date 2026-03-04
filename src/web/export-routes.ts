@@ -125,6 +125,37 @@ app.get('/api/export/full-report', zValidator('query', dateRangeSchema), async (
   }
 });
 
+// Per-section perechen report
+app.get('/api/export/perechen/:section', zValidator('query', dateRangeSchema), async (c) => {
+  const section = c.req.param('section');
+  const validSections = ['voronka', 'orders', 'stocks', 'traffic', 'marketing', 'campaigns', 'clusters'];
+  if (!validSections.includes(section)) {
+    return c.json({ error: `Invalid section: ${section}. Valid: ${validSections.join(', ')}` }, 400);
+  }
+  const { dateFrom, dateTo } = c.req.valid('query');
+  const nmIdParam = c.req.query('nmId');
+  const from = dateFrom || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  const to = dateTo || dayjs().format('YYYY-MM-DD');
+  try {
+    const nmId = nmIdParam ? parseInt(nmIdParam) : undefined;
+    const filePath = await reportGenerator.generateSectionReport(
+      section as any,
+      from,
+      to,
+      nmId
+    );
+    const file = Bun.file(filePath);
+    return new Response(file, {
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${filePath.split('/').pop()}"`,
+      },
+    });
+  } catch (error: any) {
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 // Перечень информации (полный отчёт по шаблону)
 app.get('/api/export/perechen', zValidator('query', dateRangeSchema), async (c) => {
   const { dateFrom, dateTo } = c.req.valid('query');

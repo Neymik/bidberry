@@ -10,6 +10,10 @@ import * as searchRepo from '../db/search-repository';
 
 const EXPORTS_DIR = process.env.EXPORTS_DIR || './exports';
 
+export type SectionType = 'voronka' | 'orders' | 'stocks' | 'traffic' | 'marketing' | 'campaigns' | 'clusters';
+
+const VALID_SECTIONS: SectionType[] = ['voronka', 'orders', 'stocks', 'traffic', 'marketing', 'campaigns', 'clusters'];
+
 async function ensureExportsDir(): Promise<void> {
   const fs = await import('fs/promises');
   try {
@@ -53,6 +57,42 @@ export async function generatePerechenReport(
 
   const suffix = nmId ? `_${nmId}` : '_all';
   const fileName = `perechen${suffix}_${dayjs().format('YYYY-MM-DD_HH-mm-ss')}.xlsx`;
+  const filePath = `${EXPORTS_DIR}/${fileName}`;
+
+  XLSX.writeFile(wb, filePath);
+  return filePath;
+}
+
+/**
+ * Generate a single-section report from the Перечень template.
+ */
+export async function generateSectionReport(
+  section: SectionType,
+  dateFrom: string,
+  dateTo: string,
+  nmId?: number
+): Promise<string> {
+  if (!VALID_SECTIONS.includes(section)) {
+    throw new Error(`Invalid section: ${section}. Valid: ${VALID_SECTIONS.join(', ')}`);
+  }
+
+  await ensureExportsDir();
+  const wb = XLSX.utils.book_new();
+
+  const sectionMap: Record<SectionType, () => Promise<void>> = {
+    voronka: () => addFunnelSheet(wb, dateFrom, dateTo, nmId),
+    orders: () => addOrdersSheet(wb, dateFrom, dateTo, nmId),
+    stocks: () => addStocksSheet(wb, nmId),
+    traffic: () => addTrafficSourcesSheet(wb, dateFrom, dateTo, nmId),
+    marketing: () => addMarketingEventsSheet(wb, dateFrom, dateTo, nmId),
+    campaigns: () => addCampaignsSheet(wb, dateFrom, dateTo),
+    clusters: () => addKeywordsSheet(wb, dateFrom, dateTo, nmId),
+  };
+
+  await sectionMap[section]();
+
+  const suffix = nmId ? `_${nmId}` : '';
+  const fileName = `section_${section}${suffix}_${dayjs().format('YYYY-MM-DD_HH-mm-ss')}.xlsx`;
   const filePath = `${EXPORTS_DIR}/${fileName}`;
 
   XLSX.writeFile(wb, filePath);
