@@ -2,7 +2,7 @@
 
 ## Overview
 
-New dashboard page "Мониторинг заказов" that tracks per-product advertising spend and calculates CPS (Cost Per Sale) using real WB API expense data, order counts, and a user-defined buyout percentage.
+New dashboard page "Мониторинг заказов CPS CPS" that tracks per-product advertising spend and calculates CPS (Cost Per Sale) using real WB API expense data, order counts, and a user-defined buyout percentage.
 
 **Core formula:**
 ```
@@ -244,7 +244,7 @@ Manual trigger for financial sync. Same logic as scheduler task. Returns 429 if 
 
 ## Frontend
 
-### New page: "Мониторинг заказов"
+### New page: "Мониторинг заказов CPS"
 
 **File:** `public/app/components/monitoring/MonitoringPage.tsx`
 
@@ -312,7 +312,7 @@ public/app/
       CpsChart.tsx               — Chart.js chart component
       SyncStatusBadge.tsx        — sync status indicator
   App.tsx                        — add /monitoring route
-  components/layout/AppSidebar.tsx — add "Мониторинг заказов" nav item
+  components/layout/AppSidebar.tsx — add "Мониторинг заказов CPS" nav item
 ```
 
 ## Future: CPO (Cost Per Order)
