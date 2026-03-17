@@ -17,6 +17,7 @@ import eventsRoutes from './events-routes';
 import cabinetRoutes from './cabinet-routes';
 import adminRoutes from './admin-routes';
 import monitoringRoutes from './monitoring-routes';
+import emuIngestRoutes from './emulator-ingest-routes';
 
 const app = new Hono();
 
@@ -32,7 +33,9 @@ app.route('/', authRoutes);
 // Protected routes (auth required)
 app.use('/api/*', async (c, next) => {
   // Skip auth for auth endpoints
-  if (c.req.path.startsWith('/api/auth/')) return next();
+  if (c.req.path.startsWith('/api/auth/') ||
+      c.req.path === '/api/orders/ingest' ||
+      c.req.path === '/api/orders/heartbeat') return next();
   return authMiddleware(c, next);
 });
 
@@ -50,5 +53,6 @@ app.route('/', eventsRoutes);
 app.route('/', cabinetRoutes);
 app.route('/', adminRoutes);
 app.route('/', monitoringRoutes);
+app.route('/api/orders', emuIngestRoutes);
 
 export default app;
