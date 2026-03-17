@@ -3,7 +3,9 @@ import { api } from '../../hooks/useApi';
 import { useAuth } from '../../hooks/useAuth';
 import { useToast } from '../../hooks/useToast';
 
-type Tab = 'users' | 'accounts' | 'whitelist';
+import EmulatorAdmin from './EmulatorAdmin';
+
+type Tab = 'users' | 'accounts' | 'whitelist' | 'emulators';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -21,6 +23,7 @@ export default function AdminPage() {
     { key: 'accounts', label: 'Аккаунты и кабинеты' },
     { key: 'users', label: 'Пользователи' },
     { key: 'whitelist', label: 'Белый список' },
+    { key: 'emulators', label: 'Эмуляторы' },
   ];
 
   return (
@@ -45,6 +48,7 @@ export default function AdminPage() {
       {tab === 'accounts' && <AccountsTab />}
       {tab === 'users' && <UsersTab />}
       {tab === 'whitelist' && <WhitelistTab />}
+      {tab === 'emulators' && <EmulatorAdmin />}
     </div>
   );
 }
