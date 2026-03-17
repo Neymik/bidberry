@@ -46,8 +46,8 @@ export interface EmuOrder {
 
 const ADB_PORT_MIN = 5555;
 const ADB_PORT_MAX = 5574;
-const SCRCPY_PORT_MIN = 9090;
-const SCRCPY_PORT_MAX = 9109;
+const SCRCPY_PORT_MIN = 22090;
+const SCRCPY_PORT_MAX = 22109;
 
 export async function getAllInstances(): Promise<EmulatorInstance[]> {
   return query<EmulatorInstance[]>('SELECT * FROM emulator_instances ORDER BY id');
