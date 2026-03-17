@@ -18,6 +18,7 @@ import cabinetRoutes from './cabinet-routes';
 import adminRoutes from './admin-routes';
 import monitoringRoutes from './monitoring-routes';
 import emuIngestRoutes from './emulator-ingest-routes';
+import emuAdminRoutes from './emulator-admin-routes';
 
 const app = new Hono();
 
@@ -54,5 +55,6 @@ app.route('/', cabinetRoutes);
 app.route('/', adminRoutes);
 app.route('/', monitoringRoutes);
 app.route('/api/orders', emuIngestRoutes);
+app.route('/api/admin/emulators', emuAdminRoutes);
 
 export default app;
