@@ -105,6 +105,21 @@ bun --hot ./index.ts
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
+## WBPartners-Auto (Order Monitor)
+
+Subdirectory `WBPartners-Auto/` — Python-based WB Partners mobile app automation.
+
+- **Purpose**: Monitors WB Partners Android app order feed via uiautomator2, stores orders in SQLite, exposes Telegram bot + FastAPI REST API
+- **Stack**: Python + uiautomator2 + FastAPI + Telegram bot
+- **Docker**: Redroid (Android 14, API 34) emulator + ws-scrcpy web UI
+- **Entry points**: `wb_order_monitor.py` (full automation), `server.py` (API+bot only)
+- **Ports**: ADB `127.0.0.1:5555`, API `22001`, ws-scrcpy `22090`
+- **Docker commands**:
+  - Start: `cd WBPartners-Auto && docker compose up -d`
+  - Logs: `docker logs redroid`
+  - ADB shell: `adb connect localhost:5555 && adb shell`
+  - Run monitor: `python WBPartners-Auto/wb_order_monitor.py`
+
 ## Wildberries API Notes
 
 - WB API is known to be buggy: random 500s, timeouts, rate limits, inconsistent responses
