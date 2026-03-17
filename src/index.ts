@@ -452,6 +452,16 @@ scheduler.registerTask('financial-sync', 15 * 60 * 1000, async () => {
   });
 });
 
+// Emulator health check
+import { healthCheck as emuHealthCheck } from './services/emulator-orchestrator';
+scheduler.registerTask('emulator-health-check', 60_000, async () => {
+  try {
+    await emuHealthCheck();
+  } catch (err) {
+    console.error('[Scheduler] emulator-health-check failed:', err);
+  }
+});
+
 // Start scheduler if not in test mode
 if (process.env.NODE_ENV !== 'test') {
   scheduler.start();
@@ -493,6 +503,7 @@ Bun.serve({
     '/import-export': index,
     '/admin': index,
     '/admin/emu-web': index,
+    '/emulator': index,
     '/monitoring': index,
   },
   fetch: api.fetch,
