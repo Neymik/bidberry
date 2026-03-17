@@ -479,3 +479,47 @@ CREATE TABLE IF NOT EXISTS search_cluster_stats (
     INDEX idx_date (date),
     INDEX idx_cabinet_id (cabinet_id)
 );
+
+-- Campaign expense history (from /adv/v1/upd)
+CREATE TABLE IF NOT EXISTS campaign_expenses (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  advert_id BIGINT NOT NULL,
+  upd_num BIGINT NOT NULL,
+  upd_time DATETIME NOT NULL,
+  upd_sum DECIMAL(12,2) NOT NULL DEFAULT 0,
+  campaign_name VARCHAR(255) DEFAULT '',
+  advert_type INT DEFAULT 0,
+  payment_type VARCHAR(50) DEFAULT '',
+  advert_status INT DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_expense (cabinet_id, advert_id, upd_num),
+  INDEX idx_advert_time (cabinet_id, advert_id, upd_time),
+  INDEX idx_time (cabinet_id, upd_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Account top-up history (from /adv/v1/payments)
+CREATE TABLE IF NOT EXISTS account_payments (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  payment_id BIGINT NOT NULL,
+  payment_date DATETIME NOT NULL,
+  sum DECIMAL(12,2) NOT NULL DEFAULT 0,
+  type INT DEFAULT 0,
+  status_id INT DEFAULT 0,
+  card_status VARCHAR(50) DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_payment (cabinet_id, payment_id),
+  INDEX idx_date (cabinet_id, payment_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Per-product CPS settings (user-defined)
+CREATE TABLE IF NOT EXISTS product_cps_settings (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  nm_id BIGINT NOT NULL,
+  buyout_pct DECIMAL(5,2) NOT NULL DEFAULT 80.00,
+  planned_budget_daily INT DEFAULT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_product_settings (cabinet_id, nm_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

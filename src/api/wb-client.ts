@@ -6,6 +6,8 @@ import type {
   WBKeywordStat,
   WBOrder,
   WBStock,
+  WBExpenseRecord,
+  WBPaymentRecord,
 } from '../types';
 import { withRetry } from '../utils/retry';
 
@@ -15,6 +17,7 @@ const WB_CONTENT_BASE = 'https://content-api.wildberries.ru';
 const WB_STATISTICS_BASE = 'https://statistics-api.wildberries.ru';
 const WB_PRICES_BASE = 'https://discounts-prices-api.wildberries.ru';
 const WB_CALENDAR_BASE = 'https://dp-calendar-api.wildberries.ru';
+const WB_ADV_MEDIA_BASE = 'https://advert-media-api.wildberries.ru';
 
 export class WBApiClient {
   private apiKey: string;
@@ -115,23 +118,32 @@ export class WBApiClient {
     return response?.adverts || [];
   }
 
-  // Получить статистику кампаний
+  // Получить статистику кампаний (v3 — GET with query params)
   async getCampaignStats(
     campaignIds: number[],
     dateFrom: string,
     dateTo: string
   ): Promise<WBCampaignStats[]> {
-    const response = await this.request<any[]>(
-      WB_API_BASE,
-      '/adv/v2/fullstats',
-      {
-        method: 'POST',
-        body: JSON.stringify(campaignIds.map(id => ({
-          id,
-          dates: [dateFrom, dateTo],
-        }))),
-      }
-    );
+    // v3 uses GET with comma-separated ids, max ~50 per request
+    const batchSize = 50;
+    let allResponses: any[] = [];
+
+    for (let i = 0; i < campaignIds.length; i += batchSize) {
+      const batch = campaignIds.slice(i, i + batchSize);
+      const params = new URLSearchParams({
+        ids: batch.join(','),
+        beginDate: dateFrom,
+        endDate: dateTo,
+      });
+      const response = await this.request<any[]>(
+        WB_API_BASE,
+        `/adv/v3/fullstats?${params}`
+      );
+      allResponses = allResponses.concat(response || []);
+      if (i + batchSize < campaignIds.length) await Bun.sleep(500);
+    }
+
+    const response = allResponses;
 
     // Flatten: each campaign response has days[] with per-day stats
     const result: WBCampaignStats[] = [];
@@ -439,6 +451,24 @@ export class WBApiClient {
     );
   }
 
+  // === FINANCIAL HISTORY API ===
+
+  // Получить историю расходов по кампаниям (UPD — списания)
+  async getExpenseHistory(dateFrom: string, dateTo: string): Promise<WBExpenseRecord[]> {
+    return this.request<WBExpenseRecord[]>(
+      WB_API_BASE,
+      `/adv/v1/upd?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`
+    );
+  }
+
+  // Получить историю пополнений рекламного кабинета
+  async getPaymentsHistory(dateFrom: string, dateTo: string): Promise<WBPaymentRecord[]> {
+    return this.request<WBPaymentRecord[]>(
+      WB_API_BASE,
+      `/adv/v1/payments?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`
+    );
+  }
+
   // === PRICES API ===
 
   // Получить цены и скидки на товары
@@ -484,11 +514,19 @@ export class WBApiClient {
 
   // === SEARCH CLUSTER STATS ===
 
-  // Получить статистику по поисковым кластерам кампании
-  async getSearchClusterStats(advertId: number): Promise<any[]> {
+  // Получить статистику по поисковым кластерам (POST, batch)
+  async getSearchClusterStatsBatch(
+    items: { advert_id: number; nm_id: number }[],
+    dateFrom: string,
+    dateTo: string
+  ): Promise<any[]> {
     const response = await this.request<any>(
       WB_API_BASE,
-      `/adv/v0/normquery/stats?id=${advertId}`
+      '/adv/v0/normquery/stats',
+      {
+        method: 'POST',
+        body: JSON.stringify({ from: dateFrom, to: dateTo, items }),
+      }
     );
     return response?.stat || response || [];
   }
@@ -500,7 +538,7 @@ export class WBApiClient {
     nmIds: number[],
     dateFrom: string,
     dateTo: string,
-    limit = 100
+    limit = 30
   ): Promise<any> {
     return this.request<any>(
       WB_ANALYTICS_BASE,
@@ -509,9 +547,12 @@ export class WBApiClient {
         method: 'POST',
         body: JSON.stringify({
           nmIds,
-          period: { begin: dateFrom, end: dateTo },
+          currentPeriod: { start: dateFrom, end: dateTo },
+          orderBy: { field: 'avgPosition', mode: 'asc' },
           limit,
           topOrderBy: 'openCard',
+          includeSearchTexts: true,
+          includeSubstitutedSKUs: true,
         }),
       }
     );

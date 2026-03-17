@@ -515,6 +515,90 @@ export type MarketingEventType =
   | 'stock_replenishment'
   | 'other';
 
+// === CAMPAIGN EXPENSES (from /adv/v1/upd) ===
+
+export interface WBExpenseRecord {
+  updNum: number;
+  updTime: string;
+  updSum: number;
+  advertId: number;
+  campName: string;
+  advertType: number;
+  paymentType: string;
+  advertStatus: number;
+}
+
+export interface DBCampaignExpense {
+  id: number;
+  cabinet_id: number;
+  advert_id: number;
+  upd_num: number;
+  upd_time: string;
+  upd_sum: number;
+  campaign_name: string;
+  advert_type: number;
+  payment_type: string;
+  advert_status: number;
+  created_at: string;
+}
+
+// === ACCOUNT PAYMENTS (from /adv/v1/payments) ===
+
+export interface WBPaymentRecord {
+  id: number;
+  date: string;
+  sum: number;
+  type: number;
+  statusId: number;
+  cardStatus: string;
+}
+
+export interface DBAccountPayment {
+  id: number;
+  cabinet_id: number;
+  payment_id: number;
+  payment_date: string;
+  sum: number;
+  type: number;
+  status_id: number;
+  card_status: string;
+  created_at: string;
+}
+
+// === PRODUCT CPS SETTINGS ===
+
+export interface DBProductCpsSettings {
+  id: number;
+  cabinet_id: number;
+  nm_id: number;
+  buyout_pct: number;
+  planned_budget_daily: number | null;
+  updated_at: string;
+}
+
+// === MONITORING API RESPONSE TYPES ===
+
+export interface MonitoringProduct {
+  nmId: number;
+  name: string;
+  campaigns: { id: number; name: string; status: string }[];
+  spendHourly: number;
+  spendDaily: number;
+  ordersHourly: number;
+  ordersDaily: number;
+  buyoutPct: number;
+  cpsHourly: number | null;
+  cpsDaily: number | null;
+  plannedBudgetDaily: number | null;
+}
+
+export interface CpsChartPoint {
+  time: string;
+  spend: number;
+  orders: number;
+  cps: number | null;
+}
+
 // === SCHEDULER ===
 
 export interface SchedulerStatus {

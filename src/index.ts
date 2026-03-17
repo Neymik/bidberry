@@ -11,6 +11,7 @@ import * as trafficRepo from './db/traffic-repository';
 import * as promosRepo from './db/promotions-repository';
 import * as ordersService from './services/orders-service';
 import * as stockService from './services/stock-service';
+import { syncFinancial } from './services/financial-sync';
 import * as cabinetsRepo from './db/cabinets-repository';
 import { getWBClientForCabinet } from './api/wb-client';
 import dayjs from 'dayjs';
@@ -435,6 +436,22 @@ scheduler.registerTask('cluster-stats-sync', 24 * 60 * 60 * 1000, async () => {
   });
 });
 
+// --- Financial sync (expenses + payments + budgets) ---
+scheduler.registerTask('financial-sync', 15 * 60 * 1000, async () => {
+  console.log('[Scheduler] Syncing financial data (expenses, payments, budgets)...');
+  await forEachCabinet('financial-sync', async (cabinetId, wbClient) => {
+    const importId = await repo.createImportRecord('financial-sync', undefined, cabinetId);
+    try {
+      const count = await syncFinancial(cabinetId, wbClient);
+      await repo.updateImportRecord(importId, 'completed', count);
+      console.log(`[Scheduler] Cabinet ${cabinetId} financial sync: ${count} records`);
+    } catch (error: any) {
+      await repo.updateImportRecord(importId, 'error', 0, error.message);
+      throw error;
+    }
+  });
+});
+
 // Start scheduler if not in test mode
 if (process.env.NODE_ENV !== 'test') {
   scheduler.start();
@@ -453,6 +470,7 @@ console.log(`
 ║   • /keywords          - SEO / Keywords               ║
 ║   • /financial         - P&L / Unit Economics         ║
 ║   • /import-export     - Import / Export              ║
+║   • /monitoring        - CPS Monitoring               ║
 ║   • /admin             - Admin Panel                  ║
 ║                                                       ║
 ║   New API endpoints:                                  ║
@@ -474,6 +492,8 @@ Bun.serve({
     '/financial': index,
     '/import-export': index,
     '/admin': index,
+    '/admin/emu-web': index,
+    '/monitoring': index,
   },
   fetch: api.fetch,
   development: process.env.NODE_ENV !== 'production',

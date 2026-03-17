@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import AppHeader from './components/layout/AppHeader';
 import AppSidebar from './components/layout/AppSidebar';
 import ToastContainer from './components/layout/ToastContainer';
@@ -10,6 +10,8 @@ import KeywordsPage from './components/keywords/KeywordsPage';
 import FinancialPage from './components/financial/FinancialPage';
 import ImportExportPage from './components/import-export/ImportExportPage';
 import AdminPage from './components/admin/AdminPage';
+import EmuWebPage from './components/admin/EmuWebPage';
+import MonitoringPage from './components/monitoring/MonitoringPage';
 import LoginPage from './components/auth/LoginPage';
 import { ToastProvider } from './hooks/useToast';
 import { DateRangeProvider } from './hooks/useDateRange';
@@ -18,6 +20,7 @@ import { CabinetProvider } from './hooks/useCabinet';
 
 function ProtectedApp() {
   const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -31,25 +34,34 @@ function ProtectedApp() {
     return <LoginPage />;
   }
 
+  const isFullScreen = location.pathname === '/admin/emu-web';
+
   return (
     <CabinetProvider>
       <DateRangeProvider>
         <div className="min-h-screen bg-gray-100">
           <AppHeader />
-          <div className="flex">
-            <AppSidebar />
-            <main className="flex-1 p-6 max-w-7xl">
-              <Routes>
-                <Route path="/" element={<DashboardPage />} />
-                <Route path="/campaigns" element={<CampaignsPage />} />
-                <Route path="/products" element={<ProductsPage />} />
-                <Route path="/keywords" element={<KeywordsPage />} />
-                <Route path="/financial" element={<FinancialPage />} />
-                <Route path="/import-export" element={<ImportExportPage />} />
-                <Route path="/admin" element={<AdminPage />} />
-              </Routes>
-            </main>
-          </div>
+          {isFullScreen ? (
+            <Routes>
+              <Route path="/admin/emu-web" element={<EmuWebPage />} />
+            </Routes>
+          ) : (
+            <div className="flex">
+              <AppSidebar />
+              <main className="flex-1 p-6 max-w-7xl">
+                <Routes>
+                  <Route path="/" element={<DashboardPage />} />
+                  <Route path="/campaigns" element={<CampaignsPage />} />
+                  <Route path="/products" element={<ProductsPage />} />
+                  <Route path="/keywords" element={<KeywordsPage />} />
+                  <Route path="/financial" element={<FinancialPage />} />
+                  <Route path="/import-export" element={<ImportExportPage />} />
+                  <Route path="/monitoring" element={<MonitoringPage />} />
+                  <Route path="/admin" element={<AdminPage />} />
+                </Routes>
+              </main>
+            </div>
+          )}
           <ToastContainer />
         </div>
       </DateRangeProvider>
