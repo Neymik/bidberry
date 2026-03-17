@@ -19,10 +19,12 @@ app.get('/api/monitoring/products', async (c) => {
     const allSettings = await monitoringRepo.getAllCpsSettings(cabinetId);
     const settingsMap = new Map(allSettings.map(s => [s.nm_id, s]));
 
-    // Current hour boundaries for hourly metrics
+    // Time boundaries
     const now = dayjs();
     const currentHourStart = now.startOf('hour').format('YYYY-MM-DD HH:mm:ss');
     const prevHourStart = now.subtract(1, 'hour').startOf('hour').format('YYYY-MM-DD HH:mm:ss');
+    const todayStart = now.startOf('day').format('YYYY-MM-DD');
+    const tomorrowStart = now.add(1, 'day').startOf('day').format('YYYY-MM-DD');
 
     const result = [];
 
@@ -34,9 +36,9 @@ app.get('/api/monitoring/products', async (c) => {
       const settings = settingsMap.get(product.nm_id);
       const buyoutPct = Number(settings?.buyout_pct ?? 80);
 
-      // Daily spend and orders
-      const spendDaily = await monitoringRepo.getSpendForCampaigns(cabinetId, campaignIds, dateFrom, dateToEnd);
-      const ordersDaily = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, dateFrom, dateToEnd);
+      // Daily = today only (not the entire date range)
+      const spendDaily = await monitoringRepo.getSpendForCampaigns(cabinetId, campaignIds, todayStart, tomorrowStart);
+      const ordersDaily = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, todayStart, tomorrowStart);
 
       // Hourly spend and orders (previous completed hour)
       const spendHourly = await monitoringRepo.getSpendForCampaigns(cabinetId, campaignIds, prevHourStart, currentHourStart);
