@@ -49,6 +49,9 @@ services:
       - "127.0.0.1:${APP_PORT:-3000}:3000"
     volumes:
       - ./exports:/app/exports
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/nginx/conf.d:/etc/nginx-conf
+      - /etc/wb-emulators:/etc/wb-emulators
 
 volumes:
   mysql_data:
