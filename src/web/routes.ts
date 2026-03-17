@@ -19,6 +19,7 @@ import adminRoutes from './admin-routes';
 import monitoringRoutes from './monitoring-routes';
 import emuIngestRoutes from './emulator-ingest-routes';
 import emuAdminRoutes from './emulator-admin-routes';
+import emuRoutes from './emulator-routes';
 
 const app = new Hono();
 
@@ -56,5 +57,6 @@ app.route('/', adminRoutes);
 app.route('/', monitoringRoutes);
 app.route('/api/orders', emuIngestRoutes);
 app.route('/api/admin/emulators', emuAdminRoutes);
+app.route('/api/emulators', emuRoutes);
 
 export default app;
