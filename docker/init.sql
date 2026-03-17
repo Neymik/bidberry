@@ -493,7 +493,7 @@ CREATE TABLE IF NOT EXISTS campaign_expenses (
   payment_type VARCHAR(50) DEFAULT '',
   advert_status INT DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_expense (cabinet_id, advert_id, upd_num),
+  UNIQUE KEY uq_expense (cabinet_id, advert_id, upd_time),
   INDEX idx_advert_time (cabinet_id, advert_id, upd_time),
   INDEX idx_time (cabinet_id, upd_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -4,7 +4,7 @@ import * as monitoringRepo from '../db/monitoring-repository';
 import * as repo from '../db/repository';
 
 export async function syncFinancial(cabinetId: number, wbClient: WBApiClient): Promise<number> {
-  const dateFrom = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+  const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
   const dateTo = dayjs().format('YYYY-MM-DD');
   let totalRecords = 0;
 
