@@ -523,3 +523,53 @@ CREATE TABLE IF NOT EXISTS product_cps_settings (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_product_settings (cabinet_id, nm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Emulator instance management (multi-tenant Android emulators)
+CREATE TABLE IF NOT EXISTS emulator_instances (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL UNIQUE,
+  emu_container_id VARCHAR(64),
+  scrcpy_container_id VARCHAR(64),
+  monitor_container_id VARCHAR(64),
+  emu_container_name VARCHAR(100) NOT NULL,
+  scrcpy_container_name VARCHAR(100) NOT NULL,
+  monitor_container_name VARCHAR(100) NOT NULL,
+  status ENUM('created','running','stopped','error') DEFAULT 'created',
+  monitor_status ENUM('stopped','running','error') DEFAULT 'stopped',
+  adb_port INT NOT NULL,
+  scrcpy_port INT NOT NULL,
+  ingest_api_key VARCHAR(64) NOT NULL,
+  last_heartbeat TIMESTAMP NULL,
+  error_message TEXT,
+  created_by INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (cabinet_id) REFERENCES cabinets(id),
+  FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Orders scraped from emulator (different schema from WB API orders table)
+CREATE TABLE IF NOT EXISTS emu_orders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  dedup_key VARCHAR(255) NOT NULL,
+  article VARCHAR(50) NOT NULL,
+  product VARCHAR(500),
+  size VARCHAR(50),
+  quantity VARCHAR(20),
+  status VARCHAR(50),
+  price VARCHAR(50),
+  price_cents INT,
+  date_raw VARCHAR(100),
+  date_parsed DATETIME,
+  category VARCHAR(200),
+  warehouse VARCHAR(200),
+  arrival_city VARCHAR(200),
+  first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_dedup (cabinet_id, dedup_key),
+  INDEX idx_cabinet (cabinet_id),
+  INDEX idx_article (cabinet_id, article),
+  INDEX idx_status (cabinet_id, status),
+  INDEX idx_first_seen (cabinet_id, first_seen),
+  FOREIGN KEY (cabinet_id) REFERENCES cabinets(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
