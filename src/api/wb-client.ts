@@ -429,11 +429,17 @@ export class WBApiClient {
   }
 
   // Получить бюджет кампании
+  // WB API returns: { cash, netting, total, currency } (new format)
+  // We map total → budget for backward compat
   async getCampaignBudget(campaignId: number): Promise<{ budget: number; dailyBudget: number }> {
-    return this.request<{ budget: number; dailyBudget: number }>(
+    const raw = await this.request<any>(
       WB_API_BASE,
       `/adv/v1/budget?id=${campaignId}`
     );
+    return {
+      budget: raw.total ?? raw.budget ?? 0,
+      dailyBudget: raw.dailyBudget ?? 0,
+    };
   }
 
   // Установить бюджет кампании

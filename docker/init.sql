@@ -524,6 +524,20 @@ CREATE TABLE IF NOT EXISTS product_cps_settings (
   UNIQUE KEY uq_product_settings (cabinet_id, nm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Campaign budget snapshots (polled every 15 min for hourly spend calculation)
+CREATE TABLE IF NOT EXISTS campaign_budget_snapshots (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  campaign_id BIGINT NOT NULL,
+  budget DECIMAL(12,2) NOT NULL DEFAULT 0,
+  daily_budget DECIMAL(12,2) NOT NULL DEFAULT 0,
+  snapshot_at DATETIME NOT NULL,
+  spend_since_prev DECIMAL(12,2) DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_campaign_time (cabinet_id, campaign_id, snapshot_at),
+  INDEX idx_time (cabinet_id, snapshot_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Emulator instance management (multi-tenant Android emulators)
 CREATE TABLE IF NOT EXISTS emulator_instances (
   id INT AUTO_INCREMENT PRIMARY KEY,

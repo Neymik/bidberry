@@ -32,14 +32,20 @@ export async function syncFinancial(cabinetId: number, wbClient: WBApiClient): P
     console.error(`[financial-sync] Cabinet ${cabinetId}: payments error: ${e.message}`);
   }
 
-  // 3. Update campaign budgets (targeted UPDATE, not full upsert)
+  // 3. Poll campaign budgets + save snapshots for hourly spend tracking
   try {
     const campaigns = await repo.getCampaigns(cabinetId);
     for (const campaign of campaigns) {
       try {
         const budgetData = await wbClient.getCampaignBudget(campaign.campaign_id);
-        if (budgetData?.dailyBudget !== undefined) {
-          await monitoringRepo.updateCampaignBudget(cabinetId, campaign.campaign_id, budgetData.dailyBudget);
+        if (budgetData) {
+          const budget = budgetData.budget ?? 0;
+          const dailyBudget = budgetData.dailyBudget ?? 0;
+          // Update campaign daily_budget
+          await monitoringRepo.updateCampaignBudget(cabinetId, campaign.campaign_id, dailyBudget);
+          // Save snapshot for hourly spend delta calculation
+          await monitoringRepo.saveBudgetSnapshot(cabinetId, campaign.campaign_id, budget, dailyBudget);
+          totalRecords++;
         }
         await Bun.sleep(100); // Rate limit protection
       } catch (e: any) {

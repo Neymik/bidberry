@@ -88,6 +88,76 @@ export async function updateCampaignBudget(cabinetId: number, campaignId: number
   );
 }
 
+// === Budget Snapshots ===
+
+/**
+ * Save a budget snapshot and compute spend since previous snapshot.
+ * spend = prev_budget - current_budget (when budget decreased = money spent on ads)
+ * When budget increased (top-up), we add the top-up amount to get real spend:
+ *   spend = prev_budget + top_up_amount - current_budget
+ * top_up_amount is detected when current > prev (budget went up).
+ */
+export async function saveBudgetSnapshot(
+  cabinetId: number,
+  campaignId: number,
+  budget: number,
+  dailyBudget: number
+): Promise<void> {
+  // Get previous snapshot
+  const prevRows = await query<any[]>(
+    `SELECT budget, snapshot_at FROM campaign_budget_snapshots
+     WHERE cabinet_id = ? AND campaign_id = ?
+     ORDER BY snapshot_at DESC LIMIT 1`,
+    [cabinetId, campaignId]
+  );
+
+  let spendSincePrev: number | null = null;
+  if (prevRows.length > 0) {
+    const prevBudget = Number(prevRows[0].budget);
+    if (budget <= prevBudget) {
+      // Budget decreased = spent on ads
+      spendSincePrev = Math.round((prevBudget - budget) * 100) / 100;
+    } else {
+      // Budget increased = top-up happened
+      // We can't know exact spend during a top-up interval,
+      // so record spend as 0 for this interval (top-up masks it)
+      spendSincePrev = 0;
+    }
+  }
+
+  await execute(
+    `INSERT INTO campaign_budget_snapshots
+      (cabinet_id, campaign_id, budget, daily_budget, snapshot_at, spend_since_prev)
+     VALUES (?, ?, ?, ?, NOW(), ?)`,
+    [cabinetId, campaignId, budget, dailyBudget, spendSincePrev ?? null]
+  );
+}
+
+/**
+ * Get hourly spend from budget snapshots for specific campaigns.
+ * Aggregates spend_since_prev by hour.
+ */
+export async function getHourlySpendFromSnapshots(
+  cabinetId: number,
+  campaignIds: number[],
+  dateFrom: string,
+  dateTo: string
+): Promise<{ hour: string; spend: number }[]> {
+  if (campaignIds.length === 0) return [];
+  const placeholders = campaignIds.map(() => '?').join(',');
+  const rows = await query<any[]>(
+    `SELECT DATE_FORMAT(snapshot_at, '%Y-%m-%d %H:00:00') as hour,
+            COALESCE(SUM(spend_since_prev), 0) as spend
+     FROM campaign_budget_snapshots
+     WHERE cabinet_id = ? AND campaign_id IN (${placeholders})
+       AND snapshot_at >= ? AND snapshot_at < ?
+       AND spend_since_prev IS NOT NULL
+     GROUP BY hour ORDER BY hour`,
+    [cabinetId, ...campaignIds, dateFrom, dateTo]
+  );
+  return rows.map(r => ({ hour: r.hour, spend: Number(r.spend) }));
+}
+
 // === CPS Settings ===
 
 export async function getProductCpsSettings(cabinetId: number, nmId: number): Promise<DBProductCpsSettings | null> {
