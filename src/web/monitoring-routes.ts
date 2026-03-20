@@ -104,9 +104,29 @@ app.get('/api/monitoring/products/:nmId/chart', async (c) => {
     let ordersData: { time: string; orders: number }[];
 
     if (period === 'hourly') {
-      const hourlySpend = await monitoringRepo.getHourlySpend(cabinetId, campaignIds, dateFrom, dateToEnd);
+      // WB /adv/v1/upd returns budget top-ups, not actual hourly spend.
+      // Top-ups are lumpy (e.g. 2000 RUB at 06:00) causing false CPS spikes.
+      // Fix: get daily spend totals and distribute evenly across hours that had orders.
+      const dailySpend = await monitoringRepo.getDailySpend(cabinetId, campaignIds, dateFrom, dateToEnd);
       const hourlyOrders = await monitoringRepo.getHourlyOrders(cabinetId, nmId, dateFrom, dateToEnd);
-      spendData = hourlySpend.map(h => ({ time: h.hour, spend: h.spend }));
+
+      // Build daily spend map
+      const dailySpendMap = new Map(dailySpend.map(d => [d.day, d.spend]));
+
+      // Count hours with orders per day to distribute spend
+      const hoursPerDay = new Map<string, number>();
+      for (const h of hourlyOrders) {
+        const day = h.hour.split(' ')[0];
+        hoursPerDay.set(day, (hoursPerDay.get(day) || 0) + 1);
+      }
+
+      // Distribute daily spend evenly across active hours
+      spendData = hourlyOrders.map(h => {
+        const day = h.hour.split(' ')[0];
+        const totalDaySpend = dailySpendMap.get(day) || 0;
+        const activeHours = hoursPerDay.get(day) || 1;
+        return { time: h.hour, spend: Math.round(totalDaySpend / activeHours * 100) / 100 };
+      });
       ordersData = hourlyOrders.map(h => ({ time: h.hour, orders: h.orders }));
     } else {
       const dailySpend = await monitoringRepo.getDailySpend(cabinetId, campaignIds, dateFrom, dateToEnd);
