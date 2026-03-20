@@ -45,16 +45,23 @@ app.get('/api/monitoring/products', async (c) => {
       const spendHourly = hourlySpendData.reduce((sum, h) => sum + h.spend, 0);
       const ordersHourly = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, prevHourStart, currentHourStart);
 
-      // CPS calculation
+      // CPS = spend / (orders * buyout%), CPO = spend / orders
       const cpsDaily = ordersDaily > 0 && buyoutPct > 0
         ? Math.round(spendDaily / (ordersDaily * buyoutPct / 100) * 100) / 100
         : null;
       const cpsHourly = ordersHourly > 0 && buyoutPct > 0
         ? Math.round(spendHourly / (ordersHourly * buyoutPct / 100) * 100) / 100
         : null;
+      const cpoDaily = ordersDaily > 0
+        ? Math.round(spendDaily / ordersDaily * 100) / 100
+        : null;
+      const cpoHourly = ordersHourly > 0
+        ? Math.round(spendHourly / ordersHourly * 100) / 100
+        : null;
 
       result.push({
         nmId: product.nm_id,
+        vendorCode: product.vendor_code || '',
         name: product.name || product.vendor_code || String(product.nm_id),
         campaigns: campaigns.slice(0, 2).map(c => ({
           id: c.campaign_id,
@@ -69,6 +76,8 @@ app.get('/api/monitoring/products', async (c) => {
         buyoutPct,
         cpsHourly,
         cpsDaily,
+        cpoHourly,
+        cpoDaily,
         plannedBudgetDaily: settings?.planned_budget_daily ?? null,
       });
     }
@@ -127,12 +136,15 @@ app.get('/api/monitoring/products/:nmId/chart', async (c) => {
       timeMap.set(o.time, existing);
     }
 
-    const points: { time: string; spend: number; orders: number; cps: number | null }[] = [];
+    const points: { time: string; spend: number; orders: number; cps: number | null; cpo: number | null }[] = [];
     for (const [time, data] of [...timeMap.entries()].sort()) {
       const cps = data.orders > 0 && buyoutPct > 0
         ? Math.round(data.spend / (data.orders * buyoutPct / 100) * 100) / 100
         : null;
-      points.push({ time, spend: data.spend, orders: data.orders, cps });
+      const cpo = data.orders > 0
+        ? Math.round(data.spend / data.orders * 100) / 100
+        : null;
+      points.push({ time, spend: data.spend, orders: data.orders, cps, cpo });
     }
 
     return c.json({ points });
