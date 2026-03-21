@@ -19,12 +19,16 @@ app.get('/api/monitoring/products', async (c) => {
     const allSettings = await monitoringRepo.getAllCpsSettings(cabinetId);
     const settingsMap = new Map(allSettings.map(s => [s.nm_id, s]));
 
-    // Time boundaries
+    // Time boundaries in Moscow (UTC+3), converted to UTC for DB queries
+    const MSK = 3;
     const now = dayjs();
-    const currentHourStart = now.startOf('hour').format('YYYY-MM-DD HH:mm:ss');
-    const prevHourStart = now.subtract(1, 'hour').startOf('hour').format('YYYY-MM-DD HH:mm:ss');
-    const todayStart = now.startOf('day').format('YYYY-MM-DD');
-    const tomorrowStart = now.add(1, 'day').startOf('day').format('YYYY-MM-DD');
+    const nowMsk = now.add(MSK, 'hour');
+    const mskToday = nowMsk.startOf('day');
+    const mskCurrentHour = nowMsk.startOf('hour');
+    const todayStart = mskToday.subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
+    const tomorrowStart = mskToday.add(1, 'day').subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
+    const currentHourStart = mskCurrentHour.subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
+    const prevHourStart = mskCurrentHour.subtract(1, 'hour').subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
 
     const result = [];
 
@@ -101,9 +105,12 @@ app.get('/api/monitoring/products/:nmId/chart', async (c) => {
     const cabinetId = getCabinetId(c);
     const nmId = parseInt(c.req.param('nmId'));
     const period = c.req.query('period') || 'daily';
-    const dateFrom = c.req.query('dateFrom') || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const dateTo = c.req.query('dateTo') || dayjs().format('YYYY-MM-DD');
-    const dateToEnd = dayjs(dateTo).add(1, 'day').format('YYYY-MM-DD');
+    const MSK = 3;
+    // dateFrom/dateTo are MSK dates from UI. Convert to UTC for DB queries.
+    const dateFrom = c.req.query('dateFrom') || dayjs().add(MSK, 'hour').subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = c.req.query('dateTo') || dayjs().add(MSK, 'hour').format('YYYY-MM-DD');
+    const dateFromUtc = dayjs(dateFrom).subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
+    const dateToEndUtc = dayjs(dateTo).add(1, 'day').subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
 
     const campaigns = await monitoringRepo.getCampaignsForProduct(cabinetId, nmId);
     const campaignIds = campaigns.map(c => c.campaign_id);
@@ -116,13 +123,13 @@ app.get('/api/monitoring/products/:nmId/chart', async (c) => {
     if (period === 'hourly') {
       // Use real hourly spend from budget snapshots (polled every 15 min).
       // spend_since_prev = delta between consecutive getCampaignBudget() calls.
-      const hourlySpend = await monitoringRepo.getHourlySpendFromSnapshots(cabinetId, campaignIds, dateFrom, dateToEnd);
-      const hourlyOrders = await monitoringRepo.getHourlyOrders(cabinetId, nmId, dateFrom, dateToEnd);
+      const hourlySpend = await monitoringRepo.getHourlySpendFromSnapshots(cabinetId, campaignIds, dateFromUtc, dateToEndUtc);
+      const hourlyOrders = await monitoringRepo.getHourlyOrders(cabinetId, nmId, dateFromUtc, dateToEndUtc);
       spendData = hourlySpend.map(h => ({ time: h.hour, spend: h.spend }));
       ordersData = hourlyOrders.map(h => ({ time: h.hour, orders: h.orders }));
     } else {
-      const dailySpend = await monitoringRepo.getDailySpend(cabinetId, campaignIds, dateFrom, dateToEnd);
-      const dailyOrders = await monitoringRepo.getDailyOrders(cabinetId, nmId, dateFrom, dateToEnd);
+      const dailySpend = await monitoringRepo.getDailySpend(cabinetId, campaignIds, dateFromUtc, dateToEndUtc);
+      const dailyOrders = await monitoringRepo.getDailyOrders(cabinetId, nmId, dateFromUtc, dateToEndUtc);
       spendData = dailySpend.map(d => ({ time: d.day, spend: d.spend }));
       ordersData = dailyOrders.map(d => ({ time: d.day, orders: d.orders }));
     }

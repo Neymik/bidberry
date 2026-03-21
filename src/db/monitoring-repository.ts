@@ -146,7 +146,7 @@ export async function getHourlySpendFromSnapshots(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(snapshot_at, '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(DATE_ADD(snapshot_at, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
             COALESCE(SUM(spend_since_prev), 0) as spend
      FROM campaign_budget_snapshots
      WHERE cabinet_id = ? AND campaign_id IN (${placeholders})
@@ -248,7 +248,7 @@ export async function getHourlySpend(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(upd_time, '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(DATE_ADD(upd_time, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
             COALESCE(SUM(upd_sum), 0) as spend
      FROM campaign_expenses
      WHERE cabinet_id = ? AND advert_id IN (${placeholders})
@@ -266,7 +266,7 @@ export async function getHourlyOrders(
   dateTo: string
 ): Promise<{ hour: string; orders: number }[]> {
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(date_created, '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(DATE_ADD(date_created, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
             COUNT(*) as orders
      FROM orders
      WHERE cabinet_id = ? AND nm_id = ? AND date_created >= ? AND date_created < ?
@@ -286,7 +286,7 @@ export async function getDailySpend(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(upd_time, '%Y-%m-%d') as day,
+    `SELECT DATE_FORMAT(DATE_ADD(upd_time, INTERVAL 3 HOUR), '%Y-%m-%d') as day,
             COALESCE(SUM(upd_sum), 0) as spend
      FROM campaign_expenses
      WHERE cabinet_id = ? AND advert_id IN (${placeholders})
@@ -304,7 +304,7 @@ export async function getDailyOrders(
   dateTo: string
 ): Promise<{ day: string; orders: number }[]> {
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(date_created, '%Y-%m-%d') as day,
+    `SELECT DATE_FORMAT(DATE_ADD(date_created, INTERVAL 3 HOUR), '%Y-%m-%d') as day,
             COUNT(*) as orders
      FROM orders
      WHERE cabinet_id = ? AND nm_id = ? AND date_created >= ? AND date_created < ?
