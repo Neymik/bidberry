@@ -30,6 +30,21 @@ MAX_SCROLLS = 10
 REQUIRED_FIELDS = ("article", "status", "date", "price")
 
 
+def trigger_bidberry_report():
+    """Notify bidberry backend to send an updated cabinet report via Telegram.
+    Fire-and-forget — errors are logged and swallowed."""
+    cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
+    if not cabinet_id:
+        return
+    base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
+    url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
+    try:
+        # Short timeout: the endpoint returns 202 immediately
+        requests.post(url, timeout=3)
+    except Exception as e:
+        print(f"  bidberry trigger failed: {e}")
+
+
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -343,6 +358,8 @@ def main():
                 print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
                 send_telegram(msg)
                 time.sleep(0.5)
+            # Trigger bidberry cabinet report for realtime summary update
+            trigger_bidberry_report()
         else:
             print("  No new orders")
 

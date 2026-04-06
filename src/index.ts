@@ -510,6 +510,21 @@ scheduler.registerTask('financial-sync', 15 * 60 * 1000, async () => {
   });
 });
 
+// Cabinet Telegram report: summary of orders/spend/CPO per product since MSK midnight
+import { sendCabinetReport } from './services/cabinet-report';
+scheduler.registerTask('cabinet-report', 15 * 60 * 1000, async () => {
+  console.log('[Scheduler] Sending cabinet Telegram reports...');
+  const cabinets = await cabinetsRepo.getActiveCabinets();
+  for (const cabinet of cabinets) {
+    try {
+      const sent = await sendCabinetReport(cabinet.id);
+      if (sent) console.log(`[Scheduler] Cabinet ${cabinet.id} (${cabinet.name}) report sent`);
+    } catch (error: any) {
+      console.error(`[Scheduler] cabinet-report failed for cabinet ${cabinet.id}: ${error.message}`);
+    }
+  }
+});
+
 // Emulator health check
 import { healthCheck as emuHealthCheck } from './services/emulator-orchestrator';
 scheduler.registerTask('emulator-health-check', 60_000, async () => {

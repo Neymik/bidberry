@@ -27,26 +27,26 @@ services:
       dockerfile: Dockerfile
     container_name: wb-analytics-app
     restart: unless-stopped
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
+    # host network lets the container reach proxies on 127.0.0.1
+    # (Telegram proxy on host). MySQL is reached via published port 127.0.0.1:3306.
+    network_mode: host
     depends_on:
       mysql:
         condition: service_healthy
     environment:
       - WB_API_KEY=${WB_API_KEY}
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
+      - MYSQL_HOST=127.0.0.1
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-wb_analytics}
       - MYSQL_USER=${MYSQL_USER:-wb_user}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-wb_password}
       - APP_PORT=3000
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_BOT_NAME=${TELEGRAM_BOT_NAME}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_PROXY_URL=${TELEGRAM_PROXY_URL:-}
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ACCESS_TTL=${JWT_ACCESS_TTL:-24h}
-    ports:
-      - "127.0.0.1:${APP_PORT:-3000}:3000"
     volumes:
       - ./exports:/app/exports
       - /var/run/docker.sock:/var/run/docker.sock
