@@ -1,0 +1,5 @@
+runGoogTracker: true
+announceGoogTracker: true
+server:
+  - secure: false
+    port: 22090

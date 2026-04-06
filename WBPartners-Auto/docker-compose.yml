@@ -1,0 +1,41 @@
+services:
+  redroid:
+    image: redroid/redroid:14.0.0-latest
+    container_name: redroid
+    privileged: true
+    ports:
+      - "127.0.0.1:5555:5555"
+    volumes:
+      - redroid-data:/data
+    command:
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=1920
+      - androidboot.redroid_dpi=440
+      - androidboot.redroid_fps=15
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.use_memfd=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "getprop sys.boot_completed | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  scrcpy-web:
+    image: scavin/ws-scrcpy
+    container_name: scrcpy-web
+    network_mode: host
+    depends_on:
+      redroid:
+        condition: service_healthy
+    environment:
+      - WS_SCRCPY_CONFIG=/ws-scrcpy/config.yaml
+    volumes:
+      - ./ws-scrcpy-config.yaml:/ws-scrcpy/config.yaml:ro
+    entrypoint: /bin/bash
+    command: -c "adb connect 127.0.0.1:5555 && sleep 3 && npm start"
+    restart: unless-stopped
+
+volumes:
+  redroid-data:

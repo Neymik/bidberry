@@ -64,7 +64,7 @@ export async function syncSearchQueries(
 
 /**
  * Sync search cluster stats for all ad campaigns.
- * Uses WB /adv/v0/normquery/stats endpoint per campaign.
+ * Uses WB POST /adv/v0/normquery/stats — batches all campaign-product pairs.
  */
 export async function syncSearchClusters(
   cabinetId: number,
@@ -73,22 +73,39 @@ export async function syncSearchClusters(
   const campaigns = await repo.getCampaigns(cabinetId);
   if (campaigns.length === 0) return 0;
 
-  let totalSynced = 0;
-  const today = dayjs().format('YYYY-MM-DD');
+  const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+  const dateTo = dayjs().format('YYYY-MM-DD');
 
+  // Build all (campaign, nm_id) pairs
+  const allItems: { advert_id: number; nm_id: number }[] = [];
   for (const campaign of campaigns) {
+    const products = await repo.getCampaignProducts(cabinetId, campaign.campaign_id);
+    for (const p of products) {
+      allItems.push({ advert_id: campaign.campaign_id, nm_id: p.nm_id });
+    }
+  }
+
+  if (allItems.length === 0) return 0;
+
+  let totalSynced = 0;
+
+  // Batch into chunks (WB allows up to ~20 items per request)
+  const batchSize = 20;
+  for (let i = 0; i < allItems.length; i += batchSize) {
+    const batch = allItems.slice(i, i + batchSize);
     try {
-      const stats = await wbClient.getSearchClusterStats(campaign.campaign_id);
+      const stats = await wbClient.getSearchClusterStatsBatch(batch, dateFrom, dateTo);
       if (!Array.isArray(stats)) continue;
 
       for (const cluster of stats) {
-        const clusterName = cluster.cluster || cluster.keyword || cluster.name || '';
-        if (!clusterName) continue;
+        const clusterName = cluster.cluster || cluster.norm_query || cluster.keyword || cluster.name || '';
+        const campaignId = cluster.advert_id || cluster.advertId;
+        if (!clusterName || !campaignId) continue;
 
         await searchRepo.upsertSearchClusterStats(cabinetId, {
-          campaign_id: campaign.campaign_id,
+          campaign_id: campaignId,
           cluster_name: clusterName,
-          date: today,
+          date: dateTo,
           views: cluster.views ?? 0,
           clicks: cluster.clicks ?? 0,
           ctr: cluster.ctr ?? 0,
@@ -101,10 +118,10 @@ export async function syncSearchClusters(
         totalSynced++;
       }
     } catch (err: any) {
-      console.error(`[search-sync] cluster stats error for campaign ${campaign.campaign_id}: ${err.message}`);
+      console.error(`[search-sync] cluster stats batch error: ${err.message}`);
     }
 
-    await Bun.sleep(500); // rate limit between campaigns
+    if (i + batchSize < allItems.length) await Bun.sleep(6_000);
   }
 
   return totalSynced;

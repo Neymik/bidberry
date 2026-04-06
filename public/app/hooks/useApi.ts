@@ -17,8 +17,26 @@ export async function api<T = any>(endpoint: string, options: RequestInit = {}):
   }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'API Error' })) as Record<string, string>;
-    throw new Error(error.error || `HTTP ${response.status}`);
+    const contentType = response.headers.get('content-type') || '';
+    let message = '';
+
+    if (contentType.includes('application/json')) {
+      const payload = await response.json().catch(() => null) as Record<string, any> | null;
+      if (payload) {
+        message = String(payload.error || payload.message || '');
+      }
+    } else {
+      message = await response.text().catch(() => '');
+    }
+
+    message = (message || '').trim();
+    if (!message) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+    }
+
+    const shortMessage = message.length > 400 ? `${message.slice(0, 400)}...` : message;
+    throw new Error(`HTTP ${response.status}: ${shortMessage}`);
   }
+
   return response.json() as Promise<T>;
 }

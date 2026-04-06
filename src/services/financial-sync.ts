@@ -60,8 +60,12 @@ export async function syncFinancial(cabinetId: number, wbClient: WBApiClient): P
 }
 
 export async function canSyncNow(cabinetId: number): Promise<boolean> {
-  const lastSync = await monitoringRepo.getLastFinancialSyncStatus(cabinetId);
-  if (!lastSync?.lastSyncAt) return true;
-  const lastTime = new Date(lastSync.lastSyncAt).getTime();
-  return Date.now() - lastTime > 5 * 60 * 1000;
+  const lastSync = await monitoringRepo.getLastSyncByType(cabinetId, 'financial-sync');
+  if (!lastSync) return true;
+
+  // If previous run is still processing, block a new run to avoid parallel sync storms.
+  if (lastSync.status === 'processing') return false;
+
+  const lastStarted = new Date(lastSync.started_at).getTime();
+  return Date.now() - lastStarted > 5 * 60 * 1000;
 }

@@ -305,7 +305,7 @@ CREATE TABLE IF NOT EXISTS orders (
     cabinet_id INT,
     order_id BIGINT NOT NULL,
     nm_id BIGINT NOT NULL,
-    srid VARCHAR(128),
+    srid VARCHAR(128) NOT NULL,
     date_created DATETIME NOT NULL,
     date_updated DATETIME,
     warehouse_name VARCHAR(255),
@@ -326,7 +326,7 @@ CREATE TABLE IF NOT EXISTS orders (
     sticker VARCHAR(128),
     gn_number VARCHAR(128),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_cabinet_order (cabinet_id, order_id),
+    UNIQUE KEY unique_cabinet_srid (cabinet_id, srid),
     INDEX idx_nm_id (nm_id),
     INDEX idx_order_id (order_id),
     INDEX idx_date_created (date_created),
@@ -520,6 +520,7 @@ CREATE TABLE IF NOT EXISTS product_cps_settings (
   nm_id BIGINT NOT NULL,
   buyout_pct DECIMAL(5,2) NOT NULL DEFAULT 80.00,
   planned_budget_daily INT DEFAULT NULL,
+  order_scale_pct DECIMAL(5,2) DEFAULT NULL,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_product_settings (cabinet_id, nm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -179,16 +179,30 @@ export async function upsertCpsSettings(
   cabinetId: number,
   nmId: number,
   buyoutPct: number,
-  plannedBudgetDaily: number | null
+  plannedBudgetDaily: number | null,
+  orderScalePct: number | null = undefined as any
 ): Promise<void> {
-  await execute(
-    `INSERT INTO product_cps_settings (cabinet_id, nm_id, buyout_pct, planned_budget_daily)
-     VALUES (?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-      buyout_pct = VALUES(buyout_pct),
-      planned_budget_daily = VALUES(planned_budget_daily)`,
-    [cabinetId, nmId, buyoutPct, plannedBudgetDaily ?? null]
-  );
+  // If orderScalePct not passed (undefined), preserve existing value
+  if (orderScalePct === undefined) {
+    await execute(
+      `INSERT INTO product_cps_settings (cabinet_id, nm_id, buyout_pct, planned_budget_daily)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+        buyout_pct = VALUES(buyout_pct),
+        planned_budget_daily = VALUES(planned_budget_daily)`,
+      [cabinetId, nmId, buyoutPct, plannedBudgetDaily ?? null]
+    );
+  } else {
+    await execute(
+      `INSERT INTO product_cps_settings (cabinet_id, nm_id, buyout_pct, planned_budget_daily, order_scale_pct)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+        buyout_pct = VALUES(buyout_pct),
+        planned_budget_daily = VALUES(planned_budget_daily),
+        order_scale_pct = VALUES(order_scale_pct)`,
+      [cabinetId, nmId, buyoutPct, plannedBudgetDaily ?? null, orderScalePct]
+    );
+  }
 }
 
 // === CPS Aggregation Queries ===
@@ -326,6 +340,21 @@ export async function getLastFinancialSyncStatus(cabinetId: number): Promise<{
      WHERE cabinet_id = ? AND import_type = 'financial-sync'
      ORDER BY id DESC LIMIT 1`,
     [cabinetId]
+  );
+  return rows[0] || null;
+}
+
+export async function getLastSyncByType(cabinetId: number, importType: string): Promise<{
+  started_at: string;
+  status: string;
+  records_count: number;
+} | null> {
+  const rows = await query<any[]>(
+    `SELECT started_at, status, records_count
+     FROM import_history
+     WHERE cabinet_id = ? AND import_type = ?
+     ORDER BY id DESC LIMIT 1`,
+    [cabinetId, importType]
   );
   return rows[0] || null;
 }

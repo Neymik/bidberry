@@ -292,6 +292,9 @@ export async function getProductAnalytics(
   return query<DBProductAnalytics[]>(sql, params);
 }
 
+// Alias for monitoring: get analytics rows for a specific product & date range
+export const getProductAnalyticsByDate = getProductAnalytics;
+
 // === BIDS ===
 
 export async function saveBids(

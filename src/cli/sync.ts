@@ -99,33 +99,39 @@ async function syncAnalytics(cabinetId: number, wbClient: WBApiClient): Promise<
       return { target: 'analytics', synced: 0, errors: 0, errorMessages: [] };
     }
 
-    const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const dateTo = dayjs().format('YYYY-MM-DD');
     let totalSynced = 0;
     let errors = 0;
     const errorMessages: string[] = [];
     const batchSize = 20;
+    const daysBack = 7;
 
-    for (let i = 0; i < products.length; i += batchSize) {
-      const batch = products.slice(i, i + batchSize);
-      const nmIds = batch.map(p => p.nm_id);
+    // Sync day-by-day for accurate per-day analytics
+    for (let d = daysBack; d >= 0; d--) {
+      const date = dayjs().subtract(d, 'day').format('YYYY-MM-DD');
 
-      try {
-        const analytics = await wbClient.getProductAnalytics(nmIds, dateFrom, dateTo);
-        for (const item of analytics) {
-          if (item.statistics?.selectedPeriod) {
-            await repo.upsertProductAnalytics(cabinetId, item, dateFrom);
-            totalSynced++;
+      for (let i = 0; i < products.length; i += batchSize) {
+        const batch = products.slice(i, i + batchSize);
+        const nmIds = batch.map(p => p.nm_id);
+
+        try {
+          const analytics = await wbClient.getProductAnalytics(nmIds, date, date);
+          for (const item of analytics) {
+            if (item.statistics?.selectedPeriod) {
+              await repo.upsertProductAnalytics(cabinetId, item, date);
+              totalSynced++;
+            }
           }
+        } catch (err: any) {
+          errors++;
+          const batchNum = Math.floor(i / batchSize) + 1;
+          errorMessages.push(`${date} batch ${batchNum}: ${err.message}`);
+          logError(`analytics ${date} batch ${batchNum} error: ${err.message}`);
         }
-      } catch (err: any) {
-        errors++;
-        const batchNum = Math.floor(i / batchSize) + 1;
-        errorMessages.push(`Batch ${batchNum}: ${err.message}`);
-        logError(`analytics batch ${batchNum} error: ${err.message}`);
-      }
 
-      if (i + batchSize < products.length) await Bun.sleep(500);
+        if (i + batchSize < products.length) await Bun.sleep(500);
+      }
+      // Delay between days to respect rate limits
+      if (d > 0) await Bun.sleep(500);
     }
 
     const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';

@@ -162,31 +162,73 @@ scheduler.registerTask('product-analytics-sync', 12 * 60 * 60 * 1000, async () =
         await repo.updateImportRecord(importId, 'completed', 0);
         return;
       }
-      const dateFrom = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-      const dateTo = dayjs().format('YYYY-MM-DD');
       let totalSynced = 0;
       let errors = 0;
       const batchSize = 20;
-      for (let i = 0; i < products.length; i += batchSize) {
-        const batch = products.slice(i, i + batchSize);
-        const nmIds = batch.map(p => p.nm_id);
-        try {
-          const analytics = await wbClient.getProductAnalytics(nmIds, dateFrom, dateTo);
-          for (const item of analytics) {
-            if (item.statistics?.selectedPeriod) {
-              await repo.upsertProductAnalytics(cabinetId, item, dateFrom);
-              totalSynced++;
+      // Sync today + yesterday (scheduler runs every 12h)
+      for (let d = 1; d >= 0; d--) {
+        const date = dayjs().subtract(d, 'day').format('YYYY-MM-DD');
+        for (let i = 0; i < products.length; i += batchSize) {
+          const batch = products.slice(i, i + batchSize);
+          const nmIds = batch.map(p => p.nm_id);
+          try {
+            const analytics = await wbClient.getProductAnalytics(nmIds, date, date);
+            for (const item of analytics) {
+              if (item.statistics?.selectedPeriod) {
+                await repo.upsertProductAnalytics(cabinetId, item, date);
+                totalSynced++;
+              }
             }
+          } catch (err: any) {
+            errors++;
+            console.error(`[Scheduler] Cabinet ${cabinetId} product analytics ${date} error: ${err.message}`);
           }
-        } catch (err: any) {
-          errors++;
-          console.error(`[Scheduler] Cabinet ${cabinetId} product analytics batch error: ${err.message}`);
+          if (i + batchSize < products.length) await Bun.sleep(500);
         }
-        if (i + batchSize < products.length) await Bun.sleep(500);
+        if (d > 0) await Bun.sleep(500);
       }
       const status = errors > 0 ? (totalSynced > 0 ? 'partial' : 'error') : 'completed';
       await repo.updateImportRecord(importId, status, totalSynced);
       console.log(`[Scheduler] Cabinet ${cabinetId} product analytics synced: ${totalSynced}, errors: ${errors}`);
+    } catch (error: any) {
+      await repo.updateImportRecord(importId, 'error', 0, error.message);
+      throw error;
+    }
+  });
+});
+
+// Fast analytics sync — today only, monitored products only, for fresh scaling factor
+scheduler.registerTask('product-analytics-sync-fast', 2 * 60 * 60 * 1000, async () => {
+  console.log('[Scheduler] Fast analytics sync (today)...');
+  await forEachCabinet('product-analytics-sync-fast', async (cabinetId, wbClient) => {
+    const importId = await repo.createImportRecord('product-analytics-sync-fast', undefined, cabinetId);
+    try {
+      const products = await repo.getProducts(cabinetId);
+      if (products.length === 0) {
+        await repo.updateImportRecord(importId, 'completed', 0);
+        return;
+      }
+      const today = dayjs().format('YYYY-MM-DD');
+      const nmIds = products.map(p => p.nm_id);
+      const batchSize = 20;
+      let totalSynced = 0;
+      for (let i = 0; i < nmIds.length; i += batchSize) {
+        const batch = nmIds.slice(i, i + batchSize);
+        try {
+          const analytics = await wbClient.getProductAnalytics(batch, today, today);
+          for (const item of analytics) {
+            if (item.statistics?.selectedPeriod) {
+              await repo.upsertProductAnalytics(cabinetId, item, today);
+              totalSynced++;
+            }
+          }
+        } catch (err: any) {
+          console.error(`[Scheduler] Cabinet ${cabinetId} fast analytics error: ${err.message}`);
+        }
+        if (i + batchSize < nmIds.length) await Bun.sleep(500);
+      }
+      await repo.updateImportRecord(importId, 'completed', totalSynced);
+      console.log(`[Scheduler] Cabinet ${cabinetId} fast analytics synced: ${totalSynced}`);
     } catch (error: any) {
       await repo.updateImportRecord(importId, 'error', 0, error.message);
       throw error;
@@ -382,6 +424,22 @@ scheduler.registerTask('orders-sync', 6 * 60 * 60 * 1000, async () => {
       const count = await ordersService.syncOrders(cabinetId, wbClient, dateFrom);
       await repo.updateImportRecord(importId, 'completed', count);
       console.log(`[Scheduler] Cabinet ${cabinetId} orders synced: ${count}`);
+    } catch (error: any) {
+      await repo.updateImportRecord(importId, 'error', 0, error.message);
+      throw error;
+    }
+  });
+});
+
+// Fast orders sync — lightweight, only yesterday+today (~200-500 records vs 15000 for full)
+scheduler.registerTask('orders-sync-fast', 15 * 60 * 1000, async () => {
+  console.log('[Scheduler] Fast orders sync...');
+  await forEachCabinet('orders-sync-fast', async (cabinetId, wbClient) => {
+    const importId = await repo.createImportRecord('orders-sync-fast', undefined, cabinetId);
+    try {
+      const count = await ordersService.syncOrdersFast(cabinetId, wbClient);
+      await repo.updateImportRecord(importId, 'completed', count);
+      console.log(`[Scheduler] Cabinet ${cabinetId} fast orders synced: ${count}`);
     } catch (error: any) {
       await repo.updateImportRecord(importId, 'error', 0, error.message);
       throw error;

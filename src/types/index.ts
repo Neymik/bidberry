@@ -573,6 +573,7 @@ export interface DBProductCpsSettings {
   nm_id: number;
   buyout_pct: number;
   planned_budget_daily: number | null;
+  order_scale_pct: number | null;
   updated_at: string;
 }
 

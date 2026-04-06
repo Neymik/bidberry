@@ -1,0 +1,7 @@
+uiautomator2
+python-telegram-bot
+python-dotenv
+requests
+Pillow
+fastapi
+uvicorn[standard]

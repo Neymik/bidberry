@@ -8,6 +8,12 @@ export async function syncOrders(cabinetId: number, wbClient: WBApiClient, dateF
   return ordersRepo.upsertOrdersBatch(cabinetId, orders);
 }
 
+export async function syncOrdersFast(cabinetId: number, wbClient: WBApiClient): Promise<number> {
+  const from = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+  const orders = await wbClient.getOrders(from);
+  return ordersRepo.upsertOrdersBatch(cabinetId, orders);
+}
+
 export async function getOrders(cabinetId: number, dateFrom?: string, dateTo?: string, nmId?: number) {
   return ordersRepo.getOrders(cabinetId, dateFrom, dateTo, nmId);
 }

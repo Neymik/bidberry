@@ -114,12 +114,23 @@ All run per-cabinet with error isolation. Defined in `src/index.ts`.
 | prices-sync | 24h | Prices & discounts |
 | promotions-sync | 24h | Promo participation |
 | campaign-products-sync | 12h | Campaign-product mapping |
-| orders-sync | 6h | Orders (30 days) |
+| orders-sync | 6h | Orders full sync (30 days) |
+| orders-sync-fast | 15m | Orders fast sync (yesterday+today) |
+| product-analytics-sync-fast | 2h | Today's analytics (scaling factor) |
 | stocks-sync | 12h | Inventory levels |
 | search-queries-sync | 24h | Search text analytics |
 | cluster-stats-sync | 24h | Cluster performance |
 | financial-sync | 15m | Expenses, payments, budgets |
 | emulator-health-check | 60s | Container health |
+
+## Monitoring (CPS/CPO Real-Time)
+
+- **Purpose**: real-time CPS spike detection — react quickly to pause campaigns when CPS jumps
+- **Orders**: `orders-sync-fast` every 15min (dateFrom=yesterday), full sync every 6h
+- **Spend**: budget snapshots every 15min (financial-sync)
+- **Order Scale**: user-configurable per product (like buyout %). Auto-calculated from Analytics/Statistics API ratio (~115-125%). Manual override available. `NULL` = auto mode
+- **WB API gap**: Statistics API returns ~75-85% of real orders. Analytics API gives accurate daily count but no hourly breakdown. Scale factor compensates for this
+- **Frontend**: auto-refreshes every 2min, triggers on-demand fast orders sync on page open
 
 ## APIs
 

@@ -4,6 +4,7 @@ import { getCabinetId, getWBClientFromContext } from './cabinet-context';
 import * as monitoringRepo from '../db/monitoring-repository';
 import * as repo from '../db/repository';
 import { syncFinancial, canSyncNow } from '../services/financial-sync';
+import * as ordersService from '../services/orders-service';
 
 const app = new Hono();
 
@@ -30,24 +31,60 @@ app.get('/api/monitoring/products', async (c) => {
     const currentHourStart = mskCurrentHour.subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
     const prevHourStart = mskCurrentHour.subtract(1, 'hour').subtract(MSK, 'hour').format('YYYY-MM-DD HH:mm:ss');
 
-    const result = [];
-
+    // Pre-filter monitored products and fetch accurate order counts from WB Analytics API
+    const monitoredProducts: { product: typeof products[0]; campaignIds: number[]; campaigns: any[] }[] = [];
     for (const product of products) {
       const campaigns = await monitoringRepo.getCampaignsForProduct(cabinetId, product.nm_id);
       if (campaigns.length === 0) continue;
+      monitoredProducts.push({ product, campaignIds: campaigns.map(c => c.campaign_id), campaigns });
+    }
 
-      const campaignIds = campaigns.map(c => c.campaign_id);
+    // Fetch accurate daily order counts from WB Analytics sales-funnel API
+    // (Statistics API /supplier/orders misses ~14% of orders)
+    const analyticsOrdersMap = new Map<number, number>();
+    if (monitoredProducts.length > 0) {
+      try {
+        const wbClient = getWBClientFromContext(c);
+        const todayMsk = mskToday.format('YYYY-MM-DD');
+        const nmIds = monitoredProducts.map(m => m.product.nm_id);
+        const analytics = await wbClient.getProductAnalytics(nmIds, todayMsk, todayMsk);
+        for (const a of analytics) {
+          analyticsOrdersMap.set(a.nmID, a.statistics.selectedPeriod.ordersCount);
+        }
+      } catch (e) {
+        // Fallback to orders table if analytics API fails
+        console.error('[Monitoring] Failed to fetch analytics order counts, using orders table:', e);
+      }
+    }
+
+    const result = [];
+
+    for (const { product, campaignIds, campaigns } of monitoredProducts) {
       const settings = settingsMap.get(product.nm_id);
-      const buyoutPct = Number(settings?.buyout_pct ?? 80);
+      const buyoutPct = Number(settings?.buyout_pct ?? 50);
+      const manualScalePct = settings?.order_scale_pct != null ? Number(settings.order_scale_pct) : null;
 
-      // Daily = today only (not the entire date range)
+      // Raw orders from Statistics API (orders table)
       const spendDaily = await monitoringRepo.getSpendForCampaigns(cabinetId, campaignIds, todayStart, tomorrowStart);
-      const ordersDaily = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, todayStart, tomorrowStart);
+      const rawOrdersDaily = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, todayStart, tomorrowStart);
+      const analyticsDaily = analyticsOrdersMap.get(product.nm_id) ?? null;
 
-      // Hourly spend from real budget snapshots, orders from orders table
+      // Auto scale factor from analytics/statistics ratio
+      const orderScaleAuto = rawOrdersDaily > 0 && analyticsDaily != null && analyticsDaily > rawOrdersDaily
+        ? Math.round(analyticsDaily / rawOrdersDaily * 100)
+        : 100;
+
+      // Use manual override if set, otherwise auto
+      const scalePct = manualScalePct ?? orderScaleAuto;
+      const scaleFactor = scalePct / 100;
+
+      const ordersDaily = Math.round(rawOrdersDaily * scaleFactor);
+
+      // Hourly spend from real budget snapshots, orders from orders table scaled
       const hourlySpendData = await monitoringRepo.getHourlySpendFromSnapshots(cabinetId, campaignIds, prevHourStart, currentHourStart);
       const spendHourly = hourlySpendData.reduce((sum, h) => sum + h.spend, 0);
-      const ordersHourly = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, prevHourStart, currentHourStart);
+      const rawOrdersHourly = await monitoringRepo.getOrderCountForProduct(cabinetId, product.nm_id, prevHourStart, currentHourStart);
+      const ordersHourly = Math.round(rawOrdersHourly * scaleFactor);
 
       // CPS = spend / (orders * buyout%), CPO = spend / orders
       const cpsDaily = ordersDaily > 0 && buyoutPct > 0
@@ -77,7 +114,10 @@ app.get('/api/monitoring/products', async (c) => {
         spendDaily,
         ordersHourly,
         ordersDaily,
+        ordersRaw: rawOrdersDaily,
         buyoutPct,
+        orderScalePct: manualScalePct,
+        orderScaleAuto,
         cpsHourly,
         cpsDaily,
         cpoHourly,
@@ -115,23 +155,46 @@ app.get('/api/monitoring/products/:nmId/chart', async (c) => {
     const campaigns = await monitoringRepo.getCampaignsForProduct(cabinetId, nmId);
     const campaignIds = campaigns.map(c => c.campaign_id);
     const settings = await monitoringRepo.getProductCpsSettings(cabinetId, nmId);
-    const buyoutPct = Number(settings?.buyout_pct ?? 80);
+    const buyoutPct = Number(settings?.buyout_pct ?? 50);
 
     let spendData: { time: string; spend: number }[];
     let ordersData: { time: string; orders: number }[];
 
     if (period === 'hourly') {
       // Use real hourly spend from budget snapshots (polled every 15 min).
-      // spend_since_prev = delta between consecutive getCampaignBudget() calls.
       const hourlySpend = await monitoringRepo.getHourlySpendFromSnapshots(cabinetId, campaignIds, dateFromUtc, dateToEndUtc);
       const hourlyOrders = await monitoringRepo.getHourlyOrders(cabinetId, nmId, dateFromUtc, dateToEndUtc);
       spendData = hourlySpend.map(h => ({ time: h.hour, spend: h.spend }));
-      ordersData = hourlyOrders.map(h => ({ time: h.hour, orders: h.orders }));
+
+      // Scale hourly orders using accurate daily total from product_analytics
+      // (Statistics API orders table has ~15-25% gap vs real WB data)
+      const rawTotal = hourlyOrders.reduce((s, h) => s + h.orders, 0);
+      let scaleFactor = 1;
+      if (rawTotal > 0) {
+        const analyticsRows = await repo.getProductAnalyticsByDate(cabinetId, nmId, dateFrom, dateTo);
+        if (analyticsRows.length > 0) {
+          const analyticsTotal = analyticsRows.reduce((s, r) => s + Number(r.orders_count || 0), 0);
+          if (analyticsTotal > rawTotal) scaleFactor = analyticsTotal / rawTotal;
+        }
+      }
+      ordersData = hourlyOrders.map(h => ({
+        time: h.hour,
+        orders: Math.round(h.orders * scaleFactor),
+      }));
     } else {
       const dailySpend = await monitoringRepo.getDailySpend(cabinetId, campaignIds, dateFromUtc, dateToEndUtc);
+      // Use accurate daily counts from product_analytics when available
+      const analyticsRows = await repo.getProductAnalyticsByDate(cabinetId, nmId, dateFrom, dateTo);
+      const analyticsMap = new Map(analyticsRows.map(r => {
+        const dateStr = r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
+        return [dateStr, Number(r.orders_count || 0)];
+      }));
       const dailyOrders = await monitoringRepo.getDailyOrders(cabinetId, nmId, dateFromUtc, dateToEndUtc);
       spendData = dailySpend.map(d => ({ time: d.day, spend: d.spend }));
-      ordersData = dailyOrders.map(d => ({ time: d.day, orders: d.orders }));
+      ordersData = dailyOrders.map(d => ({
+        time: d.day,
+        orders: analyticsMap.get(d.day) ?? d.orders,
+      }));
     }
 
     // Merge spend + orders by time key, compute CPS
@@ -165,22 +228,58 @@ app.put('/api/monitoring/products/:nmId/settings', async (c) => {
   try {
     const cabinetId = getCabinetId(c);
     const nmId = parseInt(c.req.param('nmId'));
-    const body = await c.req.json<{ buyoutPct?: number; plannedBudgetDaily?: number | null }>();
+    const body = await c.req.json<{ buyoutPct?: number; plannedBudgetDaily?: number | null; orderScalePct?: number | null }>();
 
     const buyoutPct = body.buyoutPct;
     if (buyoutPct !== undefined && (buyoutPct <= 0 || buyoutPct > 100)) {
       return c.json({ error: 'buyoutPct must be between 1 and 100' }, 400);
     }
+    if (body.orderScalePct !== undefined && body.orderScalePct !== null && (body.orderScalePct < 100 || body.orderScalePct > 300)) {
+      return c.json({ error: 'orderScalePct must be between 100 and 300, or null for auto' }, 400);
+    }
 
     const current = await monitoringRepo.getProductCpsSettings(cabinetId, nmId);
+    const orderScalePctArg = body.orderScalePct !== undefined
+      ? body.orderScalePct  // null = reset to auto, number = manual override
+      : undefined;          // undefined = don't touch
     await monitoringRepo.upsertCpsSettings(
       cabinetId,
       nmId,
-      buyoutPct ?? Number(current?.buyout_pct ?? 80),
-      body.plannedBudgetDaily !== undefined ? body.plannedBudgetDaily : (current?.planned_budget_daily ?? null)
+      buyoutPct ?? Number(current?.buyout_pct ?? 50),
+      body.plannedBudgetDaily !== undefined ? body.plannedBudgetDaily : (current?.planned_budget_daily ?? null),
+      orderScalePctArg as any
     );
 
     return c.json({ ok: true });
+  } catch (error: any) {
+    return c.json({ error: error.message }, 500);
+  }
+});
+
+// === POST /api/sync/orders-fast ===
+app.post('/api/sync/orders-fast', async (c) => {
+  try {
+    const cabinetId = getCabinetId(c);
+    const wbClient = getWBClientFromContext(c);
+
+    // Rate limit: check last orders-sync-fast within 5 min
+    const lastSync = await monitoringRepo.getLastSyncByType(cabinetId, 'orders-sync-fast');
+    if (lastSync?.started_at) {
+      const minAgo = (Date.now() - new Date(lastSync.started_at).getTime()) / 60000;
+      if (minAgo < 5) {
+        return c.json({ error: 'Orders sync was performed less than 5 minutes ago' }, 429);
+      }
+    }
+
+    const importId = await repo.createImportRecord('orders-sync-fast', undefined, cabinetId);
+    try {
+      const count = await ordersService.syncOrdersFast(cabinetId, wbClient);
+      await repo.updateImportRecord(importId, 'completed', count);
+      return c.json({ success: true, synced: count });
+    } catch (error: any) {
+      await repo.updateImportRecord(importId, 'error', 0, error.message);
+      return c.json({ error: error.message }, 500);
+    }
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
   }

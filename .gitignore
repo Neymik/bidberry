@@ -39,3 +39,14 @@ exports/
 
 # Temp files
 /tmp
+
+# Backup files
+*.bak
+
+# WBPartners-Auto
+WBPartners-Auto/venv/
+WBPartners-Auto/__pycache__/
+WBPartners-Auto/orders.db
+WBPartners-Auto/server.log
+WBPartners-Auto/monitor.log
+WBPartners-Auto/*.apk

@@ -18,7 +18,10 @@ interface MonitoringProduct {
   spendDaily: number;
   ordersHourly: number;
   ordersDaily: number;
+  ordersRaw: number;
   buyoutPct: number;
+  orderScalePct: number | null;
+  orderScaleAuto: number;
   cpsHourly: number | null;
   cpsDaily: number | null;
   cpoHourly: number | null;
@@ -73,6 +76,7 @@ export default function MonitoringPage() {
   const [chartPeriod, setChartPeriod] = useState<'hourly' | 'daily'>('daily');
   const [detailView, setDetailView] = useState<'chart' | 'table'>('chart');
   const [editingBuyout, setEditingBuyout] = useState<{ nmId: number; value: string } | null>(null);
+  const [editingScale, setEditingScale] = useState<{ nmId: number; value: string } | null>(null);
   const chartRef = useRef<HTMLCanvasElement>(null);
   const chartInstance = useRef<any>(null);
 
@@ -96,6 +100,11 @@ export default function MonitoringPage() {
   }, [dateFrom, dateTo]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Trigger fast orders sync on page open (fire-and-forget)
+  useEffect(() => {
+    api('/sync/orders-fast', { method: 'POST' }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -186,10 +195,22 @@ export default function MonitoringPage() {
   async function handleSync() {
     setSyncing(true);
     try {
-      await api('/sync/financial', { method: 'POST' });
+      const result = await api<{ success: boolean; synced: number; error?: string }>('/sync/financial', { method: 'POST' });
+      if (result.error) {
+        alert(`Ошибка синхронизации: ${result.error}\n\nПроверьте логи сервера для получения подробной информации.`);
+      } else {
+        alert(`Синхронизация завершена! Обновлено записей: ${result.synced}`);
+      }
       await loadData();
     } catch (e: any) {
-      alert(e.message);
+      const errorMsg = e.message || 'Неизвестная ошибка при синхронизации';
+      if (errorMsg.includes('429') || errorMsg.toLowerCase().includes('too many requests')) {
+        alert('Синхронизация уже выполняется. Попробуйте через 5 минут.');
+      } else if (errorMsg.includes('500') || errorMsg.toLowerCase().includes('internal server error')) {
+        alert(`Ошибка сервера Wildberries API. Подробности:\n${errorMsg}\n\nПроверьте консоль браузера и логи сервера.`);
+      } else {
+        alert(`Ошибка: ${errorMsg}`);
+      }
     } finally {
       setSyncing(false);
     }
@@ -210,11 +231,34 @@ export default function MonitoringPage() {
     setEditingBuyout(null);
   }
 
+  async function saveScale(nmId: number, value: string | null) {
+    const pct = value === null ? null : parseFloat(value);
+    if (pct !== null && (isNaN(pct) || pct < 100 || pct > 300)) return;
+    try {
+      await api(`/monitoring/products/${nmId}/settings`, {
+        method: 'PUT',
+        body: JSON.stringify({ orderScalePct: pct }),
+      });
+      setProducts(prev => prev.map(p =>
+        p.nmId === nmId ? { ...p, orderScalePct: pct } : p
+      ));
+    } catch (e: any) {
+      console.error('Save scale error:', e.message);
+    }
+    setEditingScale(null);
+  }
+
+  // Auto-refresh every 2 minutes
+  useEffect(() => {
+    const interval = setInterval(() => { loadData(); }, 120_000);
+    return () => clearInterval(interval);
+  }, [loadData]);
+
   if (loading) {
     return <div className="flex items-center justify-center h-64 text-gray-500">Загрузка...</div>;
   }
 
-  const colSpan = 12;
+  const colSpan = 13;
 
   return (
     <div className="p-6 space-y-6">
@@ -254,6 +298,7 @@ export default function MonitoringPage() {
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Расход/день</th>
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Заказы/час</th>
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Заказы/день</th>
+              <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase" title="Коэффициент масштабирования заказов. WB API отдаёт ~80-85% реальных заказов. Авто = рассчитан из Analytics API. Нажмите чтобы задать вручную.">Коэфф.</th>
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">% выкупа</th>
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">CPO/день</th>
               <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">CPS/час</th>
@@ -281,7 +326,51 @@ export default function MonitoringPage() {
                     {formatRub(p.spendDaily)} ₽
                   </td>
                   <td className="px-3 py-3 text-sm text-right text-gray-700">{p.ordersHourly}</td>
-                  <td className="px-3 py-3 text-sm text-right text-gray-700">{p.ordersDaily}</td>
+                  <td className="px-3 py-3 text-sm text-right text-gray-700">
+                    {p.ordersDaily}
+                    {p.ordersRaw !== p.ordersDaily && (
+                      <span className="text-xs text-gray-400 ml-1" title="Сырые данные из WB Statistics API">(из {p.ordersRaw})</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-3 text-sm text-right" onClick={e => e.stopPropagation()}>
+                    {editingScale?.nmId === p.nmId ? (
+                      <div className="flex items-center justify-end gap-1">
+                        <input
+                          type="number"
+                          className="w-16 px-1 py-0.5 text-sm border rounded text-right"
+                          value={editingScale.value}
+                          onChange={e => setEditingScale({ nmId: p.nmId, value: e.target.value })}
+                          onBlur={() => saveScale(p.nmId, editingScale.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') saveScale(p.nmId, editingScale.value);
+                            if (e.key === 'Escape') setEditingScale(null);
+                          }}
+                          autoFocus
+                          min={100}
+                          max={300}
+                        />
+                        <button
+                          className="text-xs text-gray-400 hover:text-purple-600"
+                          title="Сбросить на авто"
+                          onClick={() => saveScale(p.nmId, null)}
+                        >↺</button>
+                      </div>
+                    ) : (
+                      <span
+                        className={`cursor-pointer hover:text-purple-600 ${p.orderScalePct != null ? 'text-purple-700 font-medium' : 'text-gray-400'}`}
+                        title={p.orderScalePct != null
+                          ? `Ручная установка. Авто: ${p.orderScaleAuto}%. Нажмите для изменения, ↺ для сброса`
+                          : `Авто-расчёт из Analytics API. Нажмите чтобы задать вручную`}
+                        onClick={() => setEditingScale({
+                          nmId: p.nmId,
+                          value: String(p.orderScalePct ?? p.orderScaleAuto)
+                        })}
+                      >
+                        {p.orderScalePct != null ? `${p.orderScalePct}%` : `${p.orderScaleAuto}%`}
+                        {p.orderScalePct == null && <span className="text-xs ml-0.5">авто</span>}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-3 text-sm text-right" onClick={e => e.stopPropagation()}>
                     {editingBuyout?.nmId === p.nmId ? (
                       <input

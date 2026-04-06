@@ -2,6 +2,7 @@ import { query, execute } from './connection';
 import type { DBOrder, WBOrder } from '../types';
 
 export async function upsertOrder(cabinetId: number, order: WBOrder): Promise<void> {
+  const srid = order.srid || `fallback-${order.incomeID || 0}`;
   const sql = `
     INSERT INTO orders (cabinet_id, order_id, nm_id, srid, date_created, date_updated, warehouse_name, region,
       price, converted_price, discount_percent, spp, finished_price, price_with_disc,
@@ -9,6 +10,7 @@ export async function upsertOrder(cabinetId: number, order: WBOrder): Promise<vo
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       date_updated = VALUES(date_updated),
+      nm_id = VALUES(nm_id),
       status = VALUES(status),
       cancel_dt = VALUES(cancel_dt),
       is_cancel = VALUES(is_cancel),
@@ -16,14 +18,14 @@ export async function upsertOrder(cabinetId: number, order: WBOrder): Promise<vo
       price_with_disc = VALUES(price_with_disc)
   `;
 
-  // Use incomeID as order_id (unique per order)
-  const orderId = order.srid ? parseInt(order.srid.replace(/\D/g, '').slice(0, 15) || '0') : order.incomeID;
+  // order_id kept for display only; dedup is via unique(cabinet_id, srid)
+  const orderId = order.incomeID || 0;
 
   await execute(sql, [
     cabinetId,
     orderId,
     order.nmId,
-    order.srid || null,
+    srid,
     new Date(order.date),
     new Date(order.lastChangeDate),
     order.warehouseName || null,
