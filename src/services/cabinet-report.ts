@@ -133,12 +133,35 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
   return header + tableHeader + '\n' + body + footer;
 }
 
+// Per-cabinet send cooldown. Telegram bots have rate limits and the trigger
+// webhook can fire on every order — without this, a burst of orders becomes
+// a burst of Telegram messages and we get rate-limited.
+const COOLDOWN_MS = 60_000;
+const lastSentByCabinet = new Map<number, number>();
+
+/** Test helper — clears cooldown state. Do not call from production code. */
+export function _resetCooldownForTests() {
+  lastSentByCabinet.clear();
+}
+
 /**
- * Generate and send report for a single cabinet. Used by webhook.
+ * Generate and send report for a single cabinet. Used by webhook + scheduler.
+ * Returns false if the cooldown is active or there's nothing to report.
  */
 export async function sendCabinetReport(cabinetId: number): Promise<boolean> {
+  const now = Date.now();
+  const lastSent = lastSentByCabinet.get(cabinetId) || 0;
+  if (now - lastSent < COOLDOWN_MS) {
+    console.log(`[cabinet-report] cabinet ${cabinetId} cooldown active (${Math.round((COOLDOWN_MS - (now - lastSent)) / 1000)}s remaining)`);
+    return false;
+  }
+
   const msg = await generateCabinetReport(cabinetId);
   if (!msg) return false;
+
+  // Mark as sent BEFORE awaiting send so concurrent invocations are debounced
+  // even if Telegram is slow.
+  lastSentByCabinet.set(cabinetId, now);
   await sendTelegramMessage(msg);
   return true;
 }
