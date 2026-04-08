@@ -3,6 +3,12 @@
 ## Project Goal
 Automate the WB Partners (Wildberries) mobile Android app to monitor orders in real-time, store them in SQLite, and send notifications + analytics via Telegram bot.
 
+## Authoritative data source
+
+WBPartners-Auto is the **authoritative source of truth for orders** for the Остапенко cabinet. The WB API (via the bidberry backend) is unreliable for order data — it lags, undercounts, and sometimes breaks. The phone sees exactly what the seller sees in the WB Partners Android app, in near-realtime. When reports need order data, they should pull from this project's SQLite (`orders.db`) or HTTP API (port 22001), not from the WB API.
+
+Use the WB Advert API (via bidberry) only for data the phone cannot observe: ad spend, campaign budgets, CPM bids, balance.
+
 ## Architecture
 - **Python + uiautomator2** for UI automation and data extraction
 - **ADB** for device/app management

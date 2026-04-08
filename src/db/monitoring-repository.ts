@@ -5,6 +5,21 @@ import type {
   DBProductCpsSettings,
 } from '../types';
 
+// === Timezone helpers ===
+// All DATETIME values in this DB are stored as Moscow time wall-clock
+// (MSK = UTC+3). These helpers convert JS Date objects to MSK strings
+// for MySQL storage, avoiding timezone confusion.
+
+function toMskString(d: Date | string): string {
+  const date = typeof d === 'string' ? new Date(d) : d;
+  const mskMs = date.getTime() + 3 * 3600 * 1000;
+  return new Date(mskMs).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function nowMsk(): string {
+  return toMskString(new Date());
+}
+
 // === Expense Upserts ===
 
 export async function upsertExpense(cabinetId: number, expense: WBExpenseRecord): Promise<void> {
@@ -20,7 +35,7 @@ export async function upsertExpense(cabinetId: number, expense: WBExpenseRecord)
       cabinetId,
       expense.advertId,
       expense.updNum,
-      new Date(expense.updTime),
+      toMskString(expense.updTime),
       expense.updSum,
       expense.campName || '',
       expense.advertType ?? 0,
@@ -57,7 +72,7 @@ export async function upsertPayment(cabinetId: number, payment: WBPaymentRecord)
     [
       cabinetId,
       payment.id,
-      new Date(payment.date),
+      toMskString(payment.date),
       payment.sum,
       payment.type ?? 0,
       payment.statusId ?? 0,
@@ -128,8 +143,8 @@ export async function saveBudgetSnapshot(
   await execute(
     `INSERT INTO campaign_budget_snapshots
       (cabinet_id, campaign_id, budget, daily_budget, snapshot_at, spend_since_prev)
-     VALUES (?, ?, ?, ?, NOW(), ?)`,
-    [cabinetId, campaignId, budget, dailyBudget, spendSincePrev ?? null]
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [cabinetId, campaignId, budget, dailyBudget, nowMsk(), spendSincePrev ?? null]
   );
 }
 
@@ -146,7 +161,7 @@ export async function getHourlySpendFromSnapshots(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(DATE_ADD(snapshot_at, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(snapshot_at, '%Y-%m-%d %H:00:00') as hour,
             COALESCE(SUM(spend_since_prev), 0) as spend
      FROM campaign_budget_snapshots
      WHERE cabinet_id = ? AND campaign_id IN (${placeholders})
@@ -262,7 +277,7 @@ export async function getHourlySpend(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(DATE_ADD(upd_time, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(upd_time, '%Y-%m-%d %H:00:00') as hour,
             COALESCE(SUM(upd_sum), 0) as spend
      FROM campaign_expenses
      WHERE cabinet_id = ? AND advert_id IN (${placeholders})
@@ -280,7 +295,7 @@ export async function getHourlyOrders(
   dateTo: string
 ): Promise<{ hour: string; orders: number }[]> {
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(DATE_ADD(date_created, INTERVAL 3 HOUR), '%Y-%m-%d %H:00:00') as hour,
+    `SELECT DATE_FORMAT(date_created, '%Y-%m-%d %H:00:00') as hour,
             COUNT(*) as orders
      FROM orders
      WHERE cabinet_id = ? AND nm_id = ? AND date_created >= ? AND date_created < ?
@@ -300,7 +315,7 @@ export async function getDailySpend(
   if (campaignIds.length === 0) return [];
   const placeholders = campaignIds.map(() => '?').join(',');
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(DATE_ADD(upd_time, INTERVAL 3 HOUR), '%Y-%m-%d') as day,
+    `SELECT DATE_FORMAT(upd_time, '%Y-%m-%d') as day,
             COALESCE(SUM(upd_sum), 0) as spend
      FROM campaign_expenses
      WHERE cabinet_id = ? AND advert_id IN (${placeholders})
@@ -318,7 +333,7 @@ export async function getDailyOrders(
   dateTo: string
 ): Promise<{ day: string; orders: number }[]> {
   const rows = await query<any[]>(
-    `SELECT DATE_FORMAT(DATE_ADD(date_created, INTERVAL 3 HOUR), '%Y-%m-%d') as day,
+    `SELECT DATE_FORMAT(date_created, '%Y-%m-%d') as day,
             COUNT(*) as orders
      FROM orders
      WHERE cabinet_id = ? AND nm_id = ? AND date_created >= ? AND date_created < ?

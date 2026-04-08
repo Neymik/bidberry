@@ -42,7 +42,14 @@ CREATE INDEX IF NOT EXISTS idx_orders_date_parsed ON orders(date_parsed);
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # DELETE (rollback) journal instead of WAL: bidberry reads orders.db
+    # through a docker single-file bind mount, which doesn't propagate the
+    # sibling -wal/-shm files. WAL writes would stay invisible to bidberry
+    # until checkpoint. With DELETE mode, every commit lands in orders.db
+    # itself, so the bind-mounted file always reflects current state.
+    # Trade-off (slower writes, no concurrent reads during write) is fine
+    # for this workload: ~5-10 inserts every 3 minutes, single writer.
+    conn.execute("PRAGMA journal_mode=DELETE")
     return conn
 
 

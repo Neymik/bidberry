@@ -52,6 +52,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/nginx/conf.d:/etc/nginx-conf
       - /etc/wb-emulators:/etc/wb-emulators
+      # WBPartners-Auto phone scraping DB (read-only) — authoritative order source
+      - /home/ostap/WBPartners-Auto/orders.db:/mnt/wbpartners/orders.db:ro
 
 volumes:
   mysql_data:

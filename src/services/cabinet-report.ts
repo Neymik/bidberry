@@ -1,22 +1,24 @@
 /**
  * Cabinet daily report generator.
- * Builds a Telegram-formatted summary of orders + ad spend + CPO per product
- * since Moscow midnight. Used by:
- *   - 15-min scheduler task (automatic)
- *   - Webhook endpoint triggered by WBPartners-Auto on new-order detection
+ *
+ * Source of truth for ORDERS: WBPartners-Auto phone scraping DB (read-only
+ * mount). WB API undercounts and lags, so we don't use it for order data.
+ *
+ * Source for AD SPEND: bidberry's own tables (campaign_budget_snapshots,
+ * campaign_expenses) populated from the WB Advert API — the only way to
+ * observe spend, since the phone doesn't see it.
  */
 
 import dayjs from 'dayjs';
-import * as repo from '../db/repository';
 import * as monitoringRepo from '../db/monitoring-repository';
 import * as cabinetsRepo from '../db/cabinets-repository';
 import { sendTelegramMessage } from './telegram-notifier';
+import { getPhoneTotalsByArticle } from './wbpartners-phone-db';
 
 const MSK_OFFSET_HOURS = 3;
 
-function formatRubles(kopecksOrRubles: number): string {
-  // Input is already in rubles from campaign_expenses.upd_sum
-  const rubles = Math.round(kopecksOrRubles);
+function formatRubles(amount: number): string {
+  const rubles = Math.round(amount);
   return rubles.toLocaleString('ru-RU').replace(/,/g, ' ') + ' ₽';
 }
 
@@ -27,76 +29,106 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
   const cabinet = await cabinetsRepo.getCabinetById(cabinetId);
   if (!cabinet) return null;
 
-  // Moscow midnight boundaries (same logic as monitoring-routes.ts:23-32)
-  const now = dayjs();
-  const nowMsk = now.add(MSK_OFFSET_HOURS, 'hour');
+  // Moscow midnight boundaries. All bidberry DATETIME columns are stored as
+  // Moscow wall-clock (see db/monitoring-repository.ts timezone helpers).
+  // The phone DB uses `date_parsed` which is also MSK wall-clock, stored as
+  // ISO string without TZ. So one MSK range covers both sources.
+  const nowMsk = dayjs().add(MSK_OFFSET_HOURS, 'hour');
   const mskToday = nowMsk.startOf('day');
-  const todayStart = mskToday.subtract(MSK_OFFSET_HOURS, 'hour').format('YYYY-MM-DD HH:mm:ss');
-  const tomorrowStart = mskToday.add(1, 'day').subtract(MSK_OFFSET_HOURS, 'hour').format('YYYY-MM-DD HH:mm:ss');
+  const todayStartSql = mskToday.format('YYYY-MM-DD HH:mm:ss');
+  const tomorrowStartSql = mskToday.add(1, 'day').format('YYYY-MM-DD HH:mm:ss');
+  // Phone DB stores date_parsed in ISO format with 'T' separator
+  const todayStartIso = mskToday.format('YYYY-MM-DDTHH:mm:ss');
+  const tomorrowStartIso = mskToday.add(1, 'day').format('YYYY-MM-DDTHH:mm:ss');
 
-  const products = await repo.getProducts(cabinetId);
+  // 1. Orders from the phone (authoritative source)
+  const phoneTotals = getPhoneTotalsByArticle(todayStartIso, tomorrowStartIso);
+  if (phoneTotals.length === 0) return null;
 
+  // 2. Ad spend + WB API orders per product
+  //    spend       — bidberry tables, from WB Advert API
+  //    apiOrders   — bidberry `orders` table, from WB Statistics API
+  //    phoneOrders — authoritative, used for CPC calculation
   type Row = {
     vendorCode: string;
-    nmId: number;
-    orders: number;
+    article: string;
+    phoneOrders: number;
+    apiOrders: number;
     spend: number;
-    cpo: number | null;
+    cpc: number | null;
   };
   const rows: Row[] = [];
-  let totalOrders = 0;
+  let totalPhoneOrders = 0;
+  let totalApiOrders = 0;
   let totalSpend = 0;
 
-  for (const product of products) {
-    const campaigns = await monitoringRepo.getCampaignsForProduct(cabinetId, product.nm_id);
-    const campaignIds = campaigns.map(c => c.campaign_id);
+  for (const pt of phoneTotals) {
+    const nmId = Number(pt.article);
+    let spend = 0;
+    let apiOrders = 0;
+    if (!Number.isNaN(nmId)) {
+      const campaigns = await monitoringRepo.getCampaignsForProduct(cabinetId, nmId);
+      const campaignIds = campaigns.map(c => c.campaign_id);
 
-    const orders = await monitoringRepo.getOrderCountForProduct(
-      cabinetId,
-      product.nm_id,
-      todayStart,
-      tomorrowStart
-    );
-    const spend = await monitoringRepo.getSpendForCampaigns(
-      cabinetId,
-      campaignIds,
-      todayStart,
-      tomorrowStart
-    );
+      // Prefer snapshot-based spend (more real-time), fall back to expense
+      // history if snapshots haven't accumulated yet (early in the day).
+      const snapshotHours = await monitoringRepo.getHourlySpendFromSnapshots(
+        cabinetId,
+        campaignIds,
+        todayStartSql,
+        tomorrowStartSql
+      );
+      const snapshotSpend = snapshotHours.reduce((s, h) => s + h.spend, 0);
+      const expenseSpend = await monitoringRepo.getSpendForCampaigns(
+        cabinetId,
+        campaignIds,
+        todayStartSql,
+        tomorrowStartSql
+      );
+      spend = Math.max(snapshotSpend, expenseSpend);
 
-    // Skip products with zero activity
-    if (orders === 0 && spend === 0) continue;
+      apiOrders = await monitoringRepo.getOrderCountForProduct(
+        cabinetId,
+        nmId,
+        todayStartSql,
+        tomorrowStartSql
+      );
+    }
 
-    const cpo = orders > 0 ? Math.round(spend / orders) : null;
+    // CPC denominator = phone orders (authoritative). API undercounts ~14%.
+    const cpc = pt.orders > 0 ? Math.round(spend / pt.orders) : null;
     rows.push({
-      vendorCode: product.vendor_code || String(product.nm_id),
-      nmId: product.nm_id,
-      orders,
+      vendorCode: pt.vendorCode,
+      article: pt.article,
+      phoneOrders: pt.orders,
+      apiOrders,
       spend,
-      cpo,
+      cpc,
     });
-    totalOrders += orders;
+    totalPhoneOrders += pt.orders;
+    totalApiOrders += apiOrders;
     totalSpend += spend;
   }
 
-  if (rows.length === 0) return null;
-
-  // Sort by orders DESC
-  rows.sort((a, b) => b.orders - a.orders);
+  // Sort by phone orders DESC
+  rows.sort((a, b) => b.phoneOrders - a.phoneOrders);
 
   const timestamp = nowMsk.format('DD.MM HH:mm');
   const header = `📊 <b>${cabinet.name}</b> | ${timestamp} МСК\n`;
-  const tableHeader = '\n<b>Артикул | Заказы | Бюджет | CPO</b>';
+  const tableHeader = '\n<b>Артикул | Заказы тел/API | Бюджет | CPC</b>';
   const body = rows
     .map(r => {
-      const cpoStr = r.cpo != null ? formatRubles(r.cpo) : '—';
-      return `<code>${r.vendorCode}</code> | ${r.orders} шт | ${formatRubles(r.spend)} | ${cpoStr}`;
+      const cpcStr = r.cpc != null ? formatRubles(r.cpc) : '—';
+      return `<code>${r.vendorCode}</code> | ${r.phoneOrders}/${r.apiOrders} шт | ${formatRubles(r.spend)} | ${cpcStr}`;
     })
     .join('\n');
 
-  const totalCpo = totalOrders > 0 ? Math.round(totalSpend / totalOrders) : null;
-  const totalCpoStr = totalCpo != null ? formatRubles(totalCpo) : '—';
-  const footer = `\n──────────────\n<b>Итого:</b> ${totalOrders} шт | ${formatRubles(totalSpend)} | CPO ${totalCpoStr}`;
+  const totalCpc = totalPhoneOrders > 0 ? Math.round(totalSpend / totalPhoneOrders) : null;
+  const totalCpcStr = totalCpc != null ? formatRubles(totalCpc) : '—';
+  const footer =
+    `\n──────────────\n` +
+    `<b>Итого:</b> ${totalPhoneOrders}/${totalApiOrders} шт | ${formatRubles(totalSpend)} | CPC ${totalCpcStr}\n` +
+    `<i>* CPC = бюджет / заказы с телефона</i>`;
 
   return header + tableHeader + '\n' + body + footer;
 }

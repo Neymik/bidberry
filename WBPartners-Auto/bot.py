@@ -178,13 +178,41 @@ def _format_revenue(cents):
     return " ".join(reversed(parts)) + " ₽"
 
 
+def _fetch_bidberry_report():
+    """GET the formatted cabinet report from bidberry backend.
+    Returns the message text or None if unavailable/empty."""
+    cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
+    if not cabinet_id:
+        return None
+    base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
+    url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
+    try:
+        import requests
+        r = requests.get(url, timeout=10)
+        if not r.ok:
+            return None
+        data = r.json()
+        if data.get("empty"):
+            return None
+        return data.get("text") or None
+    except Exception as e:
+        print(f"  bidberry fetch failed: {e}")
+        return None
+
+
 @restricted
 async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     args = context.args or []
 
+    # Default /count (no args) or today: fetch rich bidberry report
+    # (includes ad budget + CPO). Falls back to local SQLite summary.
     if not args or args[0].lower() in ("today", "сегодня", "день"):
-        # Today
+        bidberry_text = _fetch_bidberry_report()
+        if bidberry_text:
+            await update.message.reply_text(bidberry_text, parse_mode="HTML")
+            return
+        # Fallback: local SQLite summary
         start = now.strftime("%Y-%m-%d") + " 00:00:00"
         end = now.strftime("%Y-%m-%d") + " 23:59:59"
         label = f"Сегодня ({now.strftime('%d.%m.%Y')})"

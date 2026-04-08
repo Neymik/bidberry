@@ -31,7 +31,21 @@ Default to using Bun instead of Node.js.
 - `src/cli/sync.ts` — Manual sync CLI
 - `public/index.html` → `public/app/main.tsx` — React SPA entry
 
-## Docker
+## Where work happens
+
+**All builds, restarts, log checks, CLI syncs, and endpoint tests run on `ssh ostapLace`, NOT on the local Mac.** The macOS checkout is only for editing and git. The Docker stack cannot be brought up locally — `docker-compose.yml` bind-mounts the WBPartners-Auto phone DB at `/home/ostap/WBPartners-Auto/orders.db`, which only exists on the server. Trying `docker compose up` on the Mac fails with "mounts denied".
+
+Deploy workflow:
+```bash
+# From local Mac after editing:
+rsync -avz --exclude='node_modules/' --exclude='.git/' --exclude='*.log' \
+  ~/Documents/bidberry/ ostapLace:~/bidberry/
+ssh ostapLace 'cd ~/bidberry && docker compose up -d --build app'
+```
+
+Then `ssh ostapLace` for everything below.
+
+## Docker (on ostapLace)
 
 - **Containers**: `wb-analytics-app` (Bun), `wb-analytics-mysql` (MySQL 8.0)
 - **Ports**: App `127.0.0.1:${APP_PORT:-3000}`, MySQL `127.0.0.1:${MYSQL_PORT:-3306}`
@@ -40,6 +54,7 @@ Default to using Bun instead of Node.js.
 - **CLI sync**: `docker exec wb-analytics-app bun run src/cli/sync.ts [command]`
 - **DB reset**: `docker compose down -v && docker compose up -d mysql`
 - App mounts Docker socket (`/var/run/docker.sock`) for emulator container management
+- App also mounts WBPartners-Auto phone DB read-only: `/home/ostap/WBPartners-Auto/orders.db:/mnt/wbpartners/orders.db:ro`
 
 ## Project Structure
 
@@ -168,6 +183,9 @@ Subdirectory `WBPartners-Auto/` — Python-based WB Partners mobile app automati
 
 ## Wildberries API Notes
 
+- **WB API is unreliable for order data** — it lags (propagation delays from minutes to hours), undercounts (~14% missing vs reality), sometimes returns stale or inconsistent results, and endpoints occasionally break or behave unexpectedly. DO NOT treat WB API order data as authoritative.
+- **Phone scraping (WBPartners-Auto) is the authoritative source for orders** — the Huawei device running the WB Partners Android app sees what the seller actually sees and captures orders in near-realtime. When WB API and phone disagree, trust the phone.
+- WB API IS the only source for data the phone can't observe: ad spend, campaign budgets, CPM bids, balance — use it for those, with the caveats below.
 - WB API is known to be buggy: random 500s, timeouts, rate limits, inconsistent responses
 - Always use retry logic with exponential backoff when calling WB API (`src/utils/retry.ts`)
 - Batch WB API calls (max 20 nmIds per request) and add delays between batches

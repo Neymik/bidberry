@@ -85,10 +85,26 @@ def connect_device():
     return d
 
 
+def handle_error_state(d):
+    """Detect and recover from WB Partners error screens.
+    Returns True if an error was handled (caller should re-navigate)."""
+    # "Что-то пошло не так" error screen with Обновить button
+    refresh_btn = d(text="Обновить")
+    if refresh_btn.exists(timeout=1):
+        print("  Error screen detected, tapping Обновить...")
+        refresh_btn.click()
+        time.sleep(3)
+        return True
+    return False
+
+
 def navigate_to_orders(d):
     """Navigate to Лента заказов page via dashboard carousel."""
     serial = os.getenv("ANDROID_DEVICE", "")
     print("  Navigating to Лента заказов...")
+
+    # Handle error screens first (e.g. "Что-то пошло не так")
+    handle_error_state(d)
 
     # Already on order list?
     header = d(resourceId="top_app_bar_header_text", text="Лента заказов")
@@ -321,6 +337,10 @@ def main():
         cycle += 1
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n--- Cycle {cycle} at {now} ---")
+
+        # Recover from error screens before trying to refresh
+        if handle_error_state(d):
+            navigate_to_orders(d)
 
         print("  Refreshing feed...")
         pull_to_refresh(d)
