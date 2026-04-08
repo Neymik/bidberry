@@ -71,9 +71,11 @@ export function verifyTelegramAuth(data: TelegramAuthData): boolean {
   const secretKey = createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
   const expectedHex = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-  // Constant-time comparison. timingSafeEqual requires equal-length buffers,
-  // so a length mismatch is rejected up front (no early return based on a
-  // partial compare).
+  // Constant-time comparison. The length guard ensures timingSafeEqual's
+  // equal-length precondition is met without branching on the secret. The
+  // try/catch below guards Buffer.from(..., 'hex') for the malformed-input
+  // case — Buffer.from throws on invalid hex; timingSafeEqual itself can't
+  // throw once the length check has passed.
   if (!data.hash || data.hash.length !== expectedHex.length) return false;
   try {
     return timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(data.hash, 'hex'));
