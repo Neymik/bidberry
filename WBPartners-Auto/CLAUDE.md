@@ -98,7 +98,10 @@ The `/count` command includes an article summary table (Артикул | Кол-
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | Telegram chat ID for notifications |
 | `ANDROID_DEVICE` | No | Device serial (empty = auto-detect) |
-| `API_KEY` | No | REST API auth key |
+| `API_KEY` | **Yes** | Required. REST API auth key. All `/orders`, `/stats`, `/export/csv` endpoints reject requests without `X-API-Key: <value>`. |
+| `TRIGGER_SECRET` | **Yes** | Required. Same value as bidberry's `TRIGGER_SECRET`. Sent as `X-Trigger-Secret` header when calling `/api/trigger/cabinet-report/:cabinetId`. |
+| `BIDBERRY_URL` | No | Default `http://127.0.0.1:3000`. Where to reach bidberry trigger endpoints. |
+| `BIDBERRY_CABINET_ID` | No | If set, the bot's `/count` and the order monitor will fetch a rich report from bidberry for this cabinet ID. |
 | `API_PORT` | No | API port (default 22001) |
 | `http_proxy` | Server | HTTP proxy for Telegram |
 | `https_proxy` | Server | HTTPS proxy for Telegram |

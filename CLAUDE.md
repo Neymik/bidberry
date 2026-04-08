@@ -55,6 +55,9 @@ Then `ssh ostapLace` for everything below.
 - **DB reset**: `docker compose down -v && docker compose up -d mysql`
 - App mounts Docker socket (`/var/run/docker.sock`) for emulator container management
 - App also mounts WBPartners-Auto phone DB read-only: `/home/ostap/WBPartners-Auto/orders.db:/mnt/wbpartners/orders.db:ro`
+- **Required env vars on `ostapLace` `~/bidberry/.env`** (deploy will fail loud if missing):
+  - `JWT_SECRET` — long random string (`openssl rand -hex 32`). Used to sign session JWTs. App refuses to start if this is unset or equal to `change-me-in-production`.
+  - `TRIGGER_SECRET` — long random string. Required header `X-Trigger-Secret` on `/api/trigger/*` webhooks. WBPartners-Auto must use the SAME value (see WBPartners-Auto/.env).
 
 ## Project Structure
 
