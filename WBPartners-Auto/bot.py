@@ -184,11 +184,18 @@ def _fetch_bidberry_report():
     cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
     if not cabinet_id:
         return None
+    secret = os.getenv("TRIGGER_SECRET")
+    if not secret:
+        print("  bidberry fetch skipped: TRIGGER_SECRET not set")
+        return None
     base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
     url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
     try:
         import requests
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=10, headers={"X-Trigger-Secret": secret})
+        if r.status_code == 401:
+            print("  bidberry fetch rejected: TRIGGER_SECRET mismatch")
+            return None
         if not r.ok:
             return None
         data = r.json()

@@ -578,6 +578,7 @@ console.log(`
 `);
 
 Bun.serve({
+  hostname: '127.0.0.1',
   port,
   routes: {
     '/': index,

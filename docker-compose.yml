@@ -47,6 +47,7 @@ services:
       - TELEGRAM_PROXY_URL=${TELEGRAM_PROXY_URL:-}
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ACCESS_TTL=${JWT_ACCESS_TTL:-24h}
+      - TRIGGER_SECRET=${TRIGGER_SECRET}
     volumes:
       - ./exports:/app/exports
       - /var/run/docker.sock:/var/run/docker.sock

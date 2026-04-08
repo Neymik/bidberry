@@ -36,11 +36,19 @@ def trigger_bidberry_report():
     cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
     if not cabinet_id:
         return
+    secret = os.getenv("TRIGGER_SECRET")
+    if not secret:
+        print("  bidberry trigger skipped: TRIGGER_SECRET not set")
+        return
     base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
     url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
     try:
         # Short timeout: the endpoint returns 202 immediately
-        requests.post(url, timeout=3)
+        r = requests.post(url, timeout=3, headers={"X-Trigger-Secret": secret})
+        if r.status_code == 401:
+            print("  bidberry trigger rejected: TRIGGER_SECRET mismatch")
+        elif not r.ok:
+            print(f"  bidberry trigger failed: HTTP {r.status_code}")
     except Exception as e:
         print(f"  bidberry trigger failed: {e}")
 
