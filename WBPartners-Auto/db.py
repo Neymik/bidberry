@@ -87,6 +87,14 @@ def parse_price_cents(price_str):
     return int(digits) * 100 if digits else None
 
 
+def _to_iso_dt(dt_str):
+    """Bot passes 'YYYY-MM-DD HH:MM:SS'; date_parsed is stored as 'YYYY-MM-DDTHH:MM:SS'.
+    Converts the former to the latter for SQL string comparison."""
+    if not dt_str:
+        return dt_str
+    return dt_str.replace(" ", "T", 1)
+
+
 def upsert_order(order_dict):
     """Insert order if key doesn't exist. Returns True if inserted (new), False if duplicate."""
     date_parsed = parse_russian_date(order_dict.get("date"))
@@ -182,9 +190,9 @@ def get_stats():
     conn = get_connection()
     try:
         total = conn.execute("SELECT count(*) as c FROM orders").fetchone()["c"]
-        today = datetime.now().strftime("%Y-%m-%d")
+        today_iso = datetime.now().strftime("%Y-%m-%dT00:00:00")
         today_count = conn.execute(
-            "SELECT count(*) as c FROM orders WHERE first_seen >= ?", (today,)
+            "SELECT count(*) as c FROM orders WHERE date_parsed >= ?", (today_iso,)
         ).fetchone()["c"]
         by_status = conn.execute(
             "SELECT status, count(*) as c FROM orders GROUP BY status ORDER BY c DESC"
@@ -201,24 +209,28 @@ def get_stats():
 def get_totals(start_dt, end_dt):
     """Get order count and revenue totals for a time range.
 
-    Args:
-        start_dt: datetime string (e.g. '2026-04-05 00:00:00')
-        end_dt: datetime string (e.g. '2026-04-05 23:59:59')
+    Filters on `date_parsed` (when the seller actually got the order from
+    the WB UI), NOT on `first_seen` (when our scraper noticed). After scraper
+    downtime, first_seen clusters around catch-up time and totals get warped.
 
-    Returns dict with count, revenue_cents, by_status list.
+    Args:
+        start_dt: 'YYYY-MM-DD HH:MM:SS' (or ISO T-format — both work)
+        end_dt:   'YYYY-MM-DD HH:MM:SS' (or ISO T-format)
     """
+    start_iso = _to_iso_dt(start_dt)
+    end_iso = _to_iso_dt(end_dt)
     conn = get_connection()
     try:
         row = conn.execute(
             "SELECT count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE first_seen >= ? AND first_seen <= ?",
-            (start_dt, end_dt),
+            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ?",
+            (start_iso, end_iso),
         ).fetchone()
         by_status = conn.execute(
             "SELECT status, count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE first_seen >= ? AND first_seen <= ? "
+            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ? "
             "GROUP BY status ORDER BY cnt DESC",
-            (start_dt, end_dt),
+            (start_iso, end_iso),
         ).fetchall()
         return {
             "count": row["cnt"],
@@ -230,14 +242,17 @@ def get_totals(start_dt, end_dt):
 
 
 def get_totals_by_article(start_dt, end_dt):
-    """Get order count and revenue grouped by article for a time range."""
+    """Get order count and revenue grouped by article for a time range.
+    Filters on date_parsed — see get_totals docstring."""
+    start_iso = _to_iso_dt(start_dt)
+    end_iso = _to_iso_dt(end_dt)
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT article, vendor_code, count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE first_seen >= ? AND first_seen <= ? "
+            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ? "
             "GROUP BY article ORDER BY cnt DESC",
-            (start_dt, end_dt),
+            (start_iso, end_iso),
         ).fetchall()
         return [(r["article"], r["vendor_code"] or "", r["cnt"], r["rev"]) for r in rows]
     finally:
