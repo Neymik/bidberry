@@ -1,34 +1,24 @@
-import { test, expect, describe, beforeEach, afterEach } from 'bun:test';
+import { test, expect, describe } from 'bun:test';
+import { assertJwtSecretConfigured } from './auth-service';
 
-describe('JWT_SECRET startup check', () => {
-  let originalSecret: string | undefined;
-  beforeEach(() => { originalSecret = process.env.JWT_SECRET; });
-  afterEach(() => {
-    if (originalSecret === undefined) delete process.env.JWT_SECRET;
-    else process.env.JWT_SECRET = originalSecret;
+describe('assertJwtSecretConfigured', () => {
+  test('throws when JWT_SECRET is empty', () => {
+    expect(() => assertJwtSecretConfigured('')).toThrow(/JWT_SECRET/);
   });
 
-  test('throws when JWT_SECRET is unset', async () => {
-    delete process.env.JWT_SECRET;
-    const { assertJwtSecretConfigured } = await import('./auth-service');
-    expect(() => assertJwtSecretConfigured()).toThrow(/JWT_SECRET/);
+  test('throws when JWT_SECRET equals the placeholder', () => {
+    expect(() => assertJwtSecretConfigured('change-me-in-production')).toThrow(/JWT_SECRET/);
   });
 
-  test('throws when JWT_SECRET equals the placeholder', async () => {
-    process.env.JWT_SECRET = 'change-me-in-production';
-    const { assertJwtSecretConfigured } = await import('./auth-service');
-    expect(() => assertJwtSecretConfigured()).toThrow(/JWT_SECRET/);
+  test('throws when JWT_SECRET is shorter than 32 characters', () => {
+    expect(() => assertJwtSecretConfigured('too-short')).toThrow(/JWT_SECRET/);
   });
 
-  test('throws when JWT_SECRET is shorter than 32 characters', async () => {
-    process.env.JWT_SECRET = 'too-short';
-    const { assertJwtSecretConfigured } = await import('./auth-service');
-    expect(() => assertJwtSecretConfigured()).toThrow(/JWT_SECRET/);
+  test('passes when JWT_SECRET is a strong 64-char value', () => {
+    expect(() => assertJwtSecretConfigured('a'.repeat(64))).not.toThrow();
   });
 
-  test('passes when JWT_SECRET is a strong value', async () => {
-    process.env.JWT_SECRET = 'a'.repeat(64);
-    const { assertJwtSecretConfigured } = await import('./auth-service');
-    expect(() => assertJwtSecretConfigured()).not.toThrow();
+  test('passes when JWT_SECRET is exactly 32 characters', () => {
+    expect(() => assertJwtSecretConfigured('b'.repeat(32))).not.toThrow();
   });
 });

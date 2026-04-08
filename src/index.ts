@@ -27,8 +27,8 @@ api.route('/', routes);
 if (process.env.NODE_ENV !== 'test') {
   try {
     assertJwtSecretConfigured();
-  } catch (err: any) {
-    console.error(`[startup] FATAL: ${err.message}`);
+  } catch (err) {
+    console.error(`[startup] FATAL: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 }

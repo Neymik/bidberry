@@ -30,19 +30,25 @@ const JWT_SECRET = process.env.JWT_SECRET || '';
 
 /**
  * Hard-fail at startup if JWT_SECRET is missing, default, or weak.
+ *
+ * By default validates the module constant `JWT_SECRET` — the same value
+ * signToken/verifyToken use. The optional `value` parameter exists for tests
+ * so they can cover failure modes without mutating process.env (which would
+ * be a no-op because Bun caches the module after first import and the
+ * `JWT_SECRET` constant is frozen at that point).
+ *
  * Called from src/index.ts before Bun.serve starts. We do NOT throw at
- * import time because tests need to import the module to mock pieces.
+ * import time so tests can load the module to mock other pieces.
  */
-export function assertJwtSecretConfigured(): void {
-  const v = process.env.JWT_SECRET || '';
-  if (!v) {
+export function assertJwtSecretConfigured(value: string = JWT_SECRET): void {
+  if (!value) {
     throw new Error('JWT_SECRET is not set. Generate one with `openssl rand -hex 32` and add it to .env.');
   }
-  if (v === 'change-me-in-production') {
+  if (value === 'change-me-in-production') {
     throw new Error('JWT_SECRET is still the default placeholder. Replace it with a real secret.');
   }
-  if (v.length < 32) {
-    throw new Error(`JWT_SECRET must be at least 32 characters (got ${v.length}). Use \`openssl rand -hex 32\`.`);
+  if (value.length < 32) {
+    throw new Error(`JWT_SECRET must be at least 32 characters (got ${value.length}). Use \`openssl rand -hex 32\`.`);
   }
 }
 const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || '24h';
