@@ -53,15 +53,26 @@ def trigger_bidberry_report():
         print(f"  bidberry trigger failed: {e}")
 
 
-def send_telegram(text):
+def send_telegram(text, max_attempts=3):
+    """Send a message to Telegram. Returns True on success, False otherwise.
+
+    Retries with exponential backoff (2s, 4s, 8s) before giving up. The caller
+    decides whether to mark the related order as 'known' based on the result —
+    a failed send must NOT cause us to skip the next cycle's retry.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if not resp.ok:
-            print(f"  Telegram error: {resp.status_code} {resp.text}")
-    except Exception as e:
-        print(f"  Telegram send failed: {e}")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.ok:
+                return True
+            print(f"  Telegram error (attempt {attempt}/{max_attempts}): {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            print(f"  Telegram send failed (attempt {attempt}/{max_attempts}): {e}")
+        if attempt < max_attempts:
+            time.sleep(2 ** attempt)  # 2, 4, 8
+    return False
 
 
 def format_order_message(order):
@@ -370,24 +381,32 @@ def main():
             time.sleep(2)
             new_orders = collect_new_orders(d, known_keys)
 
-        # Save new orders to DB (oldest first)
+        # Save new orders to DB (oldest first). DB upsert is unconditional,
+        # but the in-memory `known_keys` set is only updated AFTER a successful
+        # Telegram send — that way, if Telegram is down, the next cycle re-sees
+        # the order as "new" and retries the notification.
         saved_orders = []
         for order in new_orders:
             order["first_seen"] = now
             if upsert_order(order):
                 saved_orders.append(order)
-                known_keys.add(order["key"])
         new_orders = saved_orders
 
         if new_orders:
             print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
+            any_sent = False
             for o in new_orders:
                 msg = format_order_message(o)
                 print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
-                send_telegram(msg)
+                if send_telegram(msg):
+                    known_keys.add(o["key"])
+                    any_sent = True
+                else:
+                    print(f"  WARN: Telegram send failed for {o.get('key')} — will retry next cycle")
                 time.sleep(0.5)
-            # Trigger bidberry cabinet report for realtime summary update
-            trigger_bidberry_report()
+            # Trigger bidberry cabinet report only if at least one notification went out
+            if any_sent:
+                trigger_bidberry_report()
         else:
             print("  No new orders")
 
