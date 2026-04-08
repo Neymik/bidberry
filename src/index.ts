@@ -15,11 +15,23 @@ import { syncFinancial } from './services/financial-sync';
 import * as cabinetsRepo from './db/cabinets-repository';
 import { getWBClientForCabinet } from './api/wb-client';
 import dayjs from 'dayjs';
+import { assertJwtSecretConfigured } from './services/auth-service';
 
 const api = new Hono();
 
 // Mount all API routes
 api.route('/', routes);
+
+// Fail loud on missing/weak JWT_SECRET. Better to crash on boot than silently
+// sign tokens with a known string.
+if (process.env.NODE_ENV !== 'test') {
+  try {
+    assertJwtSecretConfigured();
+  } catch (err: any) {
+    console.error(`[startup] FATAL: ${err.message}`);
+    process.exit(1);
+  }
+}
 
 const port = parseInt(process.env.APP_PORT || '3000');
 

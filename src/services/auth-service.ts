@@ -26,7 +26,25 @@ export interface AuthResponse {
   user: DBUser;
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+
+/**
+ * Hard-fail at startup if JWT_SECRET is missing, default, or weak.
+ * Called from src/index.ts before Bun.serve starts. We do NOT throw at
+ * import time because tests need to import the module to mock pieces.
+ */
+export function assertJwtSecretConfigured(): void {
+  const v = process.env.JWT_SECRET || '';
+  if (!v) {
+    throw new Error('JWT_SECRET is not set. Generate one with `openssl rand -hex 32` and add it to .env.');
+  }
+  if (v === 'change-me-in-production') {
+    throw new Error('JWT_SECRET is still the default placeholder. Replace it with a real secret.');
+  }
+  if (v.length < 32) {
+    throw new Error(`JWT_SECRET must be at least 32 characters (got ${v.length}). Use \`openssl rand -hex 32\`.`);
+  }
+}
 const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || '24h';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
