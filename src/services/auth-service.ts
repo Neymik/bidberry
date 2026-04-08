@@ -1,4 +1,4 @@
-import { createHmac, createHash } from 'crypto';
+import { createHmac, createHash, timingSafeEqual } from 'crypto';
 import jwt from 'jsonwebtoken';
 import * as usersRepo from '../db/users-repository';
 import * as cabinetsRepo from '../db/cabinets-repository';
@@ -52,9 +52,9 @@ export function assertJwtSecretConfigured(value: string = JWT_SECRET): void {
   }
 }
 const JWT_ACCESS_TTL = process.env.JWT_ACCESS_TTL || '24h';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 export function verifyTelegramAuth(data: TelegramAuthData): boolean {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
   if (!TELEGRAM_BOT_TOKEN) return false;
 
   const params: string[] = [];
@@ -69,9 +69,17 @@ export function verifyTelegramAuth(data: TelegramAuthData): boolean {
   const dataCheckString = params.join('\n');
 
   const secretKey = createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest();
-  const hmac = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+  const expectedHex = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-  return hmac === data.hash;
+  // Constant-time comparison. timingSafeEqual requires equal-length buffers,
+  // so a length mismatch is rejected up front (no early return based on a
+  // partial compare).
+  if (!data.hash || data.hash.length !== expectedHex.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(data.hash, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthResponse> {
