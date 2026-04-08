@@ -39,8 +39,10 @@ async function requireTriggerSecret(c: Context, next: Next) {
   await next();
 }
 
-// All trigger routes require the shared secret.
-app.use('/api/trigger/*', requireTriggerSecret);
+// All routes in this sub-app require the shared secret. The glob is relative
+// to this sub-app (not to the parent mount point), so auth stays on even if
+// the sub-app is re-mounted at a different path in the future.
+app.use('/*', requireTriggerSecret);
 
 // POST /api/trigger/cabinet-report/:cabinetId
 // Triggered by WBPartners-Auto on detection of a new order.
