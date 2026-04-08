@@ -1,6 +1,7 @@
 import type { Context, Next } from 'hono';
 import { verifyToken } from '../services/auth-service';
 import * as cabinetsRepo from '../db/cabinets-repository';
+import * as usersRepo from '../db/users-repository';
 
 export async function authMiddleware(c: Context, next: Next) {
   // Try Authorization header first
@@ -57,10 +58,17 @@ export async function authMiddleware(c: Context, next: Next) {
 
 /**
  * Admin-only middleware. Must be used AFTER authMiddleware.
- * Returns 403 if user role is not 'admin'.
+ *
+ * Re-checks the role from the database on every request — the JWT role claim
+ * is informational only. This means a demoted user loses admin immediately,
+ * not after their 24h JWT expires.
  */
 export async function adminMiddleware(c: Context, next: Next) {
-  const role = c.get('role' as never) as string | undefined;
+  const userId = c.get('userId' as never) as number | undefined;
+  if (!userId) {
+    return c.json({ error: 'Forbidden: admin access required' }, 403);
+  }
+  const role = await usersRepo.getRoleById(userId);
   if (role !== 'admin') {
     return c.json({ error: 'Forbidden: admin access required' }, 403);
   }

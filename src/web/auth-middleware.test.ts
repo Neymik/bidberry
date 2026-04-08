@@ -62,6 +62,11 @@ mock.module('../db/cabinets-repository', () => ({
   updateCabinetLastSync: mock(async () => {}),
 }));
 
+const mockGetRoleById = mock(async (_id: number) => 'admin');
+mock.module('../db/users-repository', () => ({
+  getRoleById: mockGetRoleById,
+}));
+
 import { authMiddleware, adminMiddleware } from './auth-middleware';
 
 // ============================================================
@@ -87,6 +92,7 @@ function createAdminApp() {
   const app = new Hono();
   // Simulate already-authenticated context
   app.use('/api/admin/*', async (c, next) => {
+    c.set('userId', 1);
     c.set('role', c.req.header('X-Test-Role') || 'user');
     await next();
   });
@@ -241,6 +247,11 @@ describe('authMiddleware', () => {
 // ============================================================
 
 describe('adminMiddleware', () => {
+  beforeEach(() => {
+    mockGetRoleById.mockReset();
+    mockGetRoleById.mockImplementation(async () => 'admin');
+  });
+
   test('allows admin role through', async () => {
     const app = createAdminApp();
     const res = await app.request('/api/admin/test', {
@@ -252,6 +263,7 @@ describe('adminMiddleware', () => {
   });
 
   test('blocks non-admin role (403)', async () => {
+    mockGetRoleById.mockImplementation(async () => 'user');
     const app = createAdminApp();
     const res = await app.request('/api/admin/test', {
       headers: { 'X-Test-Role': 'user' },
@@ -259,5 +271,23 @@ describe('adminMiddleware', () => {
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error).toContain('admin access required');
+  });
+
+  test('blocks user whose DB role was demoted even if JWT still says admin', async () => {
+    mockGetRoleById.mockImplementation(async () => 'user');
+    const app = createAdminApp();
+    const res = await app.request('/api/admin/test', {
+      headers: { 'X-Test-Role': 'admin' }, // JWT context says admin…
+    });
+    expect(res.status).toBe(403); // …but DB says user, so block.
+  });
+
+  test('allows when DB confirms admin role', async () => {
+    mockGetRoleById.mockImplementation(async () => 'admin');
+    const app = createAdminApp();
+    const res = await app.request('/api/admin/test', {
+      headers: { 'X-Test-Role': 'admin' },
+    });
+    expect(res.status).toBe(200);
   });
 });

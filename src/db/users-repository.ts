@@ -60,3 +60,11 @@ export async function updateUser(
     [data.username || null, data.first_name || null, data.last_name || null, data.photo_url || null, telegramId]
   );
 }
+
+export async function getRoleById(id: number): Promise<string | null> {
+  const rows = await query<{ role: string }[]>(
+    'SELECT role FROM users WHERE id = ?',
+    [id]
+  );
+  return rows[0]?.role || null;
+}
