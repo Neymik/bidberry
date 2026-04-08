@@ -29,6 +29,7 @@ export interface DBCabinet {
 export interface DBAllowedUser {
   id: number;
   username: string;
+  telegram_id: number | null;
   added_by: string | null;
   created_at: Date;
 }
@@ -160,13 +161,66 @@ export async function userHasAccessToCabinet(userId: number, cabinetId: number):
 }
 
 // === WHITELIST ===
+//
+// Migration story: the original table keyed access on `username`, which is
+// mutable on Telegram's side and reusable by anyone after release. The new
+// model keys on `telegram_id` (immutable, unique). To keep existing seeded
+// rows working without a flag-day data migration, we run in dual mode:
+//
+//   - rows with telegram_id IS NULL → "pending claim", any user with the
+//     matching username can log in once and the row gets locked to their id
+//   - rows with telegram_id IS NOT NULL → only that id can use the row
+//
+// `migrateAllowedUsersAddTelegramId` is idempotent and runs at startup.
+
+export async function migrateAllowedUsersAddTelegramId(): Promise<void> {
+  // Add the column if missing.
+  const cols = await query<any[]>(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'allowed_users'
+       AND COLUMN_NAME = 'telegram_id'`
+  );
+  if (cols.length === 0) {
+    await execute('ALTER TABLE allowed_users ADD COLUMN telegram_id BIGINT NULL');
+    await execute('CREATE UNIQUE INDEX uq_allowed_users_telegram_id ON allowed_users (telegram_id)');
+    console.log('[migration] allowed_users.telegram_id column added');
+  }
+}
+
+export async function isUserAllowedByTelegramId(telegramId: number): Promise<boolean> {
+  const rows = await query<any[]>(
+    'SELECT 1 FROM allowed_users WHERE telegram_id = ? LIMIT 1',
+    [telegramId]
+  );
+  return rows.length > 0;
+}
 
 export async function isUserAllowed(username: string): Promise<boolean> {
+  // Username-only path: only matches PENDING rows (telegram_id IS NULL).
+  // A row that has already been claimed by some telegram_id is no longer
+  // a valid entry for a different account that happens to share the username.
   const rows = await query<any[]>(
-    'SELECT 1 FROM allowed_users WHERE username = ? LIMIT 1',
+    'SELECT 1 FROM allowed_users WHERE username = ? AND telegram_id IS NULL LIMIT 1',
     [username]
   );
   return rows.length > 0;
+}
+
+export async function lockAllowedUserToTelegramId(
+  username: string,
+  telegramId: number
+): Promise<void> {
+  // Bind the pending row to this telegram_id. The unique index prevents
+  // double-binding to the same telegram_id (if the user already has another
+  // row, this UPDATE will fail loud and we keep the existing row).
+  try {
+    await execute(
+      'UPDATE allowed_users SET telegram_id = ? WHERE username = ? AND telegram_id IS NULL',
+      [telegramId, username]
+    );
+  } catch (err: any) {
+    console.error(`[whitelist] could not lock ${username} → ${telegramId}: ${err.message}`);
+  }
 }
 
 export async function addAllowedUser(username: string, addedBy?: string): Promise<void> {

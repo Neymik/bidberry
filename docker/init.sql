@@ -56,13 +56,20 @@ CREATE TABLE IF NOT EXISTS cabinets (
     INDEX idx_active (is_active)
 );
 
--- Белый список пользователей (Telegram usernames)
+-- Белый список пользователей (по telegram_id, username — legacy/seed)
+--
+-- Dual-mode: rows with telegram_id IS NULL are "pending claim" — the first
+-- successful login by a user whose Telegram username matches will lock the
+-- row to that user's telegram_id. Once locked, the username field is just
+-- a label; access is keyed on telegram_id.
 CREATE TABLE IF NOT EXISTS allowed_users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(64) NOT NULL,
+    telegram_id BIGINT NULL,
     added_by VARCHAR(64),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_username (username)
+    UNIQUE KEY unique_username (username),
+    UNIQUE KEY uq_allowed_users_telegram_id (telegram_id)
 );
 
 -- Seed allowed_users with existing whitelist

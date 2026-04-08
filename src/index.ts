@@ -16,6 +16,7 @@ import * as cabinetsRepo from './db/cabinets-repository';
 import { getWBClientForCabinet } from './api/wb-client';
 import dayjs from 'dayjs';
 import { assertJwtSecretConfigured } from './services/auth-service';
+import { migrateAllowedUsersAddTelegramId } from './db/cabinets-repository';
 
 const api = new Hono();
 
@@ -31,6 +32,11 @@ if (process.env.NODE_ENV !== 'test') {
     console.error(`[startup] FATAL: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
+  // Idempotent — runs the ALTER TABLE only if the column doesn't exist yet.
+  migrateAllowedUsersAddTelegramId().catch(err => {
+    console.error(`[startup] allowed_users migration failed: ${err.message}`);
+    // Don't crash — auth still works without the column, just less safely.
+  });
 }
 
 const port = parseInt(process.env.APP_PORT || '3000');

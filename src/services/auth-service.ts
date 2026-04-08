@@ -98,8 +98,10 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
     throw new Error('Telegram auth data expired');
   }
 
-  // Whitelist check via DB
-  if (!data.username || !(await cabinetsRepo.isUserAllowed(data.username))) {
+  // Whitelist check (dual-mode): telegram_id wins; fall back to a pending
+  // username row and lock it on success.
+  const allowed = await _checkWhitelistForTests(data);
+  if (!allowed) {
     throw new Error('Access denied: your account is not whitelisted');
   }
 
@@ -168,6 +170,24 @@ function parseExpiry(ttl: string): number {
     case 'd': return val * 86400;
     default: return val;
   }
+}
+
+/**
+ * Whitelist check used by loginWithTelegram. Exported for tests.
+ *
+ * Returns true if the user is allowed. As a side effect, if the user is
+ * allowed only via a pending (telegram_id IS NULL) username row, that row
+ * is locked to the user's telegram_id so it can't be reused.
+ */
+export async function _checkWhitelistForTests(data: { id: number; username?: string }): Promise<boolean> {
+  if (await cabinetsRepo.isUserAllowedByTelegramId(data.id)) {
+    return true;
+  }
+  if (data.username && (await cabinetsRepo.isUserAllowed(data.username))) {
+    await cabinetsRepo.lockAllowedUserToTelegramId(data.username, data.id);
+    return true;
+  }
+  return false;
 }
 
 export async function getCurrentUser(userId: number): Promise<DBUser | null> {
