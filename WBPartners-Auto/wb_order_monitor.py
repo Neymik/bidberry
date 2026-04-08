@@ -381,19 +381,21 @@ def main():
             time.sleep(2)
             new_orders = collect_new_orders(d, known_keys)
 
-        # Save new orders to DB (oldest first). DB upsert is unconditional,
-        # but the in-memory `known_keys` set is only updated AFTER a successful
-        # Telegram send — that way, if Telegram is down, the next cycle re-sees
-        # the order as "new" and retries the notification.
-        saved_orders = []
+        # Upsert new orders to DB unconditionally. `collect_new_orders` already
+        # filters by `known_keys`, so every element of `new_orders` is one we
+        # haven't successfully sent yet — either because it's genuinely new OR
+        # because a previous cycle's Telegram send failed and the order is now
+        # persistent in the DB but pending notification. We pass ALL of them
+        # to the send loop; `known_keys` is the single source of truth for
+        # "notification confirmed".
         for order in new_orders:
             order["first_seen"] = now
-            if upsert_order(order):
-                saved_orders.append(order)
-        new_orders = saved_orders
+            upsert_order(order)  # INSERT OR IGNORE — return value ignored
 
         if new_orders:
-            print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
+            # Count new-to-DB (first-time) vs retry for logging clarity
+            new_count = len(new_orders)
+            print(f"\n  *** {new_count} ORDER(S) PENDING NOTIFICATION ***")
             any_sent = False
             for o in new_orders:
                 msg = format_order_message(o)
@@ -404,7 +406,7 @@ def main():
                 else:
                     print(f"  WARN: Telegram send failed for {o.get('key')} — will retry next cycle")
                 time.sleep(0.5)
-            # Trigger bidberry cabinet report only if at least one notification went out
+            # Only trigger bidberry if at least one notification landed this cycle
             if any_sent:
                 trigger_bidberry_report()
         else:
