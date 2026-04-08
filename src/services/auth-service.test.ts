@@ -79,3 +79,28 @@ describe('verifyTelegramAuth', () => {
     expect(verifyTelegramAuth(makeAuthData() as any)).toBe(false);
   });
 });
+
+describe('loginWithTelegram replay window', () => {
+  beforeEach(() => {
+    process.env.TELEGRAM_BOT_TOKEN = 'fake-bot-token-1234567890';
+    process.env.JWT_SECRET = 'a'.repeat(64);
+  });
+
+  test('rejects payloads older than 300 seconds', async () => {
+    const { loginWithTelegram } = await import('./auth-service');
+    // Build a payload with a stale auth_date (10 minutes ago)
+    const old = Math.floor(Date.now() / 1000) - 600;
+    const payload = { id: 1, first_name: 'X', auth_date: old, hash: 'doesntmatter' };
+    await expect(loginWithTelegram(payload as any))
+      .rejects.toThrow(/expired|Invalid/);
+  });
+
+  test('rejects payloads older than 5 minutes but younger than 24 hours', async () => {
+    const { loginWithTelegram } = await import('./auth-service');
+    // 10 minutes ago — well inside the old 24h window, well outside the new 5m window
+    const stale = Math.floor(Date.now() / 1000) - 600;
+    const payload = { id: 1, first_name: 'X', auth_date: stale, hash: 'doesntmatter' };
+    await expect(loginWithTelegram(payload as any))
+      .rejects.toThrow(/expired|Invalid/);
+  });
+});

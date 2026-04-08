@@ -89,9 +89,12 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
     throw new Error('Invalid Telegram auth data');
   }
 
-  // Check auth_date is not too old (allow 1 day)
+  // Reject auth payloads older than 5 minutes. The Telegram widget submits
+  // immediately after click, so 300s easily covers slow networks + clock skew
+  // while shutting the door on 24h replay attacks.
+  const TELEGRAM_AUTH_MAX_AGE_SEC = 300;
   const now = Math.floor(Date.now() / 1000);
-  if (now - data.auth_date > 86400) {
+  if (now - data.auth_date > TELEGRAM_AUTH_MAX_AGE_SEC) {
     throw new Error('Telegram auth data expired');
   }
 
