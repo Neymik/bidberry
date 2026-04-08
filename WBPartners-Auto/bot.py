@@ -78,9 +78,8 @@ async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = 5
     if context.args:
         try:
-            limit = int(context.args[0])
-            limit = min(limit, 50)
-        except ValueError:
+            limit = max(1, min(int(context.args[0]), 50))
+        except (TypeError, ValueError):
             pass
 
     orders = get_recent_orders(limit)
