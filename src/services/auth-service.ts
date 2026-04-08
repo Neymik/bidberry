@@ -125,15 +125,10 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
     });
   }
 
-  // Auto-create default account+cabinet association if user has none
-  const accounts = await cabinetsRepo.getAccountsForUser(user.id);
-  if (accounts.length === 0) {
-    // Find first available account (or create one)
-    const allAccounts = await cabinetsRepo.getAllAccounts();
-    if (allAccounts.length > 0) {
-      await cabinetsRepo.addUserToAccount(user.id, allAccounts[0].id, 'member');
-    }
-  }
+  // NOTE: We deliberately do NOT auto-attach the user to any account on first
+  // login. Previously this code attached to accounts[0], which leaked tenant
+  // zero's data to every newly whitelisted user. New users see an empty
+  // dashboard until an admin assigns them in /admin → Accounts.
 
   return generateAuthResponse(user);
 }
