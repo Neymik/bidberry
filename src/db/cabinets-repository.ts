@@ -206,20 +206,36 @@ export async function isUserAllowed(username: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-export async function lockAllowedUserToTelegramId(
+/**
+ * Atomically claim a pending whitelist row for a given telegram_id.
+ *
+ * Returns true only if exactly one pending row was found AND locked to this
+ * telegram_id. Returns false if no matching pending row existed OR another
+ * concurrent login claimed it first. This is the single atomic operation
+ * that replaces the previous check-then-lock pattern, which had a TOCTOU
+ * window where two concurrent logins with the same username but different
+ * telegram_ids could both pass the check.
+ *
+ * Caller contract: `isUserAllowedByTelegramId` should be checked FIRST. This
+ * function is only for the fallback path when the user has no telegram_id
+ * binding yet.
+ */
+export async function claimPendingUsername(
   username: string,
   telegramId: number
-): Promise<void> {
-  // Bind the pending row to this telegram_id. The unique index prevents
-  // double-binding to the same telegram_id (if the user already has another
-  // row, this UPDATE will fail loud and we keep the existing row).
+): Promise<boolean> {
   try {
-    await execute(
+    const result = await execute(
       'UPDATE allowed_users SET telegram_id = ? WHERE username = ? AND telegram_id IS NULL',
       [telegramId, username]
     );
+    return result.affectedRows === 1;
   } catch (err: any) {
-    console.error(`[whitelist] could not lock ${username} → ${telegramId}: ${err.message}`);
+    // Unique-index violation on telegram_id: this telegram_id is already
+    // bound to a DIFFERENT row (e.g. admin added the user twice under two
+    // usernames). That's a misconfiguration, not a valid login.
+    console.error(`[whitelist] could not claim ${username} → ${telegramId}: ${err.message}`);
+    return false;
   }
 }
 

@@ -100,7 +100,7 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
 
   // Whitelist check (dual-mode): telegram_id wins; fall back to a pending
   // username row and lock it on success.
-  const allowed = await _checkWhitelistForTests(data);
+  const allowed = await checkWhitelist(data);
   if (!allowed) {
     throw new Error('Access denied: your account is not whitelisted');
   }
@@ -173,18 +173,23 @@ function parseExpiry(ttl: string): number {
 }
 
 /**
- * Whitelist check used by loginWithTelegram. Exported for tests.
+ * Dual-mode whitelist check used by loginWithTelegram. Exported for testing.
  *
- * Returns true if the user is allowed. As a side effect, if the user is
- * allowed only via a pending (telegram_id IS NULL) username row, that row
- * is locked to the user's telegram_id so it can't be reused.
+ * Order of operations:
+ *  1. Check telegram_id — if already bound, allow immediately.
+ *  2. Fall back to an atomic claim on a pending username row. Two concurrent
+ *     logins racing for the same pending row will be resolved by the atomic
+ *     UPDATE — exactly one wins.
+ *  3. Otherwise, deny.
+ *
+ * NOTE: Only ONE caller exists in production (`loginWithTelegram`). The name
+ * is kept short because this helper encapsulates the whole whitelist policy.
  */
-export async function _checkWhitelistForTests(data: { id: number; username?: string }): Promise<boolean> {
+export async function checkWhitelist(data: { id: number; username?: string }): Promise<boolean> {
   if (await cabinetsRepo.isUserAllowedByTelegramId(data.id)) {
     return true;
   }
-  if (data.username && (await cabinetsRepo.isUserAllowed(data.username))) {
-    await cabinetsRepo.lockAllowedUserToTelegramId(data.username, data.id);
+  if (data.username && (await cabinetsRepo.claimPendingUsername(data.username, data.id))) {
     return true;
   }
   return false;

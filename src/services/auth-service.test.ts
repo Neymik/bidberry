@@ -106,15 +106,14 @@ describe('loginWithTelegram replay window', () => {
 });
 
 describe('whitelist dual-mode (telegram_id + username fallback)', () => {
-  test('locks username row to telegram_id on first successful login', async () => {
-    const lockSpy = mock(async (_username: string, _telegramId: number) => {});
+  test('claims pending username row on first successful login', async () => {
+    const claimSpy = mock(async (_username: string, _telegramId: number) => true);
     const isAllowedByIdSpy = mock(async (_telegramId: number) => false);
-    const isAllowedByUsernameSpy = mock(async (_username: string) => true);
 
     mock.module('../db/cabinets-repository', () => ({
       isUserAllowedByTelegramId: isAllowedByIdSpy,
-      isUserAllowed: isAllowedByUsernameSpy,
-      lockAllowedUserToTelegramId: lockSpy,
+      claimPendingUsername: claimSpy,
+      isUserAllowed: mock(async () => false),
       getAccountsForUser: mock(async () => []),
       getCabinetsForUser: mock(async () => []),
       getAllAccounts: mock(async () => []),
@@ -126,17 +125,17 @@ describe('whitelist dual-mode (telegram_id + username fallback)', () => {
     process.env.TELEGRAM_BOT_TOKEN = 'fake-bot-token-1234567890';
     process.env.JWT_SECRET = 'a'.repeat(64);
 
-    const { _checkWhitelistForTests } = await import('./auth-service');
-    const ok = await _checkWhitelistForTests({ id: 555, username: 'bob' });
+    const { checkWhitelist } = await import('./auth-service');
+    const ok = await checkWhitelist({ id: 555, username: 'bob' });
     expect(ok).toBe(true);
-    expect(lockSpy).toHaveBeenCalledWith('bob', 555);
+    expect(claimSpy).toHaveBeenCalledWith('bob', 555);
   });
 
   test('rejects when neither telegram_id nor username matches', async () => {
     mock.module('../db/cabinets-repository', () => ({
       isUserAllowedByTelegramId: mock(async () => false),
+      claimPendingUsername: mock(async () => false),
       isUserAllowed: mock(async () => false),
-      lockAllowedUserToTelegramId: mock(async () => {}),
       getAccountsForUser: mock(async () => []),
       getCabinetsForUser: mock(async () => []),
       getAllAccounts: mock(async () => []),
@@ -145,17 +144,17 @@ describe('whitelist dual-mode (telegram_id + username fallback)', () => {
       userHasAccessToCabinet: mock(async () => false),
     }));
 
-    const { _checkWhitelistForTests } = await import('./auth-service');
-    const ok = await _checkWhitelistForTests({ id: 999, username: 'nope' });
+    const { checkWhitelist } = await import('./auth-service');
+    const ok = await checkWhitelist({ id: 999, username: 'nope' });
     expect(ok).toBe(false);
   });
 
   test('telegram_id match alone is sufficient (no username required)', async () => {
-    const lockSpy = mock(async () => {});
+    const claimSpy = mock(async () => true);
     mock.module('../db/cabinets-repository', () => ({
       isUserAllowedByTelegramId: mock(async () => true),
+      claimPendingUsername: claimSpy,
       isUserAllowed: mock(async () => false),
-      lockAllowedUserToTelegramId: lockSpy,
       getAccountsForUser: mock(async () => []),
       getCabinetsForUser: mock(async () => []),
       getAllAccounts: mock(async () => []),
@@ -164,9 +163,31 @@ describe('whitelist dual-mode (telegram_id + username fallback)', () => {
       userHasAccessToCabinet: mock(async () => false),
     }));
 
-    const { _checkWhitelistForTests } = await import('./auth-service');
-    const ok = await _checkWhitelistForTests({ id: 1234 });
+    const { checkWhitelist } = await import('./auth-service');
+    const ok = await checkWhitelist({ id: 1234 });
     expect(ok).toBe(true);
-    expect(lockSpy).not.toHaveBeenCalled();
+    expect(claimSpy).not.toHaveBeenCalled();
+  });
+
+  test('concurrent claim loses when another telegram_id got there first', async () => {
+    // Simulate: isUserAllowedByTelegramId returns false (not yet bound),
+    // claimPendingUsername returns false (another request beat us to the lock)
+    const claimSpy = mock(async () => false);
+    mock.module('../db/cabinets-repository', () => ({
+      isUserAllowedByTelegramId: mock(async () => false),
+      claimPendingUsername: claimSpy,
+      isUserAllowed: mock(async () => true), // would have matched under old buggy flow
+      getAccountsForUser: mock(async () => []),
+      getCabinetsForUser: mock(async () => []),
+      getAllAccounts: mock(async () => []),
+      addUserToAccount: mock(async () => {}),
+      getCabinetById: mock(async () => null),
+      userHasAccessToCabinet: mock(async () => false),
+    }));
+
+    const { checkWhitelist } = await import('./auth-service');
+    const ok = await checkWhitelist({ id: 777, username: 'bob' });
+    expect(ok).toBe(false);
+    expect(claimSpy).toHaveBeenCalledWith('bob', 777);
   });
 });
