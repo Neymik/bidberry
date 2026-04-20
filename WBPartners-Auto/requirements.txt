@@ -1,5 +1,5 @@
 uiautomator2
-python-telegram-bot
+python-telegram-bot[socks]
 python-dotenv
 requests
 Pillow

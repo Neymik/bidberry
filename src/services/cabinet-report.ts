@@ -55,7 +55,7 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
     phoneOrders: number;
     apiOrders: number;
     spend: number;
-    cpc: number | null;
+    cpo: number | null;
   };
   const rows: Row[] = [];
   let totalPhoneOrders = 0;
@@ -95,15 +95,15 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
       );
     }
 
-    // CPC denominator = phone orders (authoritative). API undercounts ~14%.
-    const cpc = pt.orders > 0 ? Math.round(spend / pt.orders) : null;
+    // CPO denominator = phone orders (authoritative). API undercounts ~14%.
+    const cpo = pt.orders > 0 ? Math.round(spend / pt.orders) : null;
     rows.push({
       vendorCode: pt.vendorCode,
       article: pt.article,
       phoneOrders: pt.orders,
       apiOrders,
       spend,
-      cpc,
+      cpo,
     });
     totalPhoneOrders += pt.orders;
     totalApiOrders += apiOrders;
@@ -115,20 +115,20 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
 
   const timestamp = nowMsk.format('DD.MM HH:mm');
   const header = `📊 <b>${cabinet.name}</b> | ${timestamp} МСК\n`;
-  const tableHeader = '\n<b>Артикул | Заказы тел/API | Бюджет | CPC</b>';
+  const tableHeader = '\n<b>Артикул | Заказы тел/API | Бюджет | CPO</b>';
   const body = rows
     .map(r => {
-      const cpcStr = r.cpc != null ? formatRubles(r.cpc) : '—';
-      return `<code>${r.vendorCode}</code> | ${r.phoneOrders}/${r.apiOrders} шт | ${formatRubles(r.spend)} | ${cpcStr}`;
+      const cpoStr = r.cpo != null ? formatRubles(r.cpo) : '—';
+      return `<code>${r.vendorCode}</code> | ${r.phoneOrders}/${r.apiOrders} шт | ${formatRubles(r.spend)} | ${cpoStr}`;
     })
     .join('\n');
 
-  const totalCpc = totalPhoneOrders > 0 ? Math.round(totalSpend / totalPhoneOrders) : null;
-  const totalCpcStr = totalCpc != null ? formatRubles(totalCpc) : '—';
+  const totalCpo = totalPhoneOrders > 0 ? Math.round(totalSpend / totalPhoneOrders) : null;
+  const totalCpoStr = totalCpo != null ? formatRubles(totalCpo) : '—';
   const footer =
     `\n──────────────\n` +
-    `<b>Итого:</b> ${totalPhoneOrders}/${totalApiOrders} шт | ${formatRubles(totalSpend)} | CPC ${totalCpcStr}\n` +
-    `<i>* CPC = бюджет / заказы с телефона</i>`;
+    `<b>Итого:</b> ${totalPhoneOrders}/${totalApiOrders} шт | ${formatRubles(totalSpend)} | CPO ${totalCpoStr}\n` +
+    `<i>* CPO = бюджет / заказы с телефона</i>`;
 
   return header + tableHeader + '\n' + body + footer;
 }

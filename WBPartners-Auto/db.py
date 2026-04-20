@@ -14,22 +14,24 @@ MONTHS_RU = {
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    key           TEXT    NOT NULL UNIQUE,
-    article       TEXT    NOT NULL,
-    product       TEXT    NOT NULL,
-    size          TEXT    NOT NULL,
-    quantity      TEXT    NOT NULL,
-    status        TEXT    NOT NULL,
-    date_raw      TEXT    NOT NULL,
-    date_parsed   TEXT    NOT NULL,
-    price         TEXT    NOT NULL,
-    price_cents   INTEGER NOT NULL,
-    vendor_code   TEXT,
-    category      TEXT,
-    warehouse     TEXT,
-    arrival_city  TEXT,
-    first_seen    TEXT    NOT NULL
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    key                 TEXT    NOT NULL UNIQUE,
+    article             TEXT    NOT NULL,
+    product             TEXT    NOT NULL,
+    size                TEXT    NOT NULL,
+    quantity            TEXT    NOT NULL,
+    status              TEXT    NOT NULL,
+    date_raw            TEXT    NOT NULL,
+    date_parsed         TEXT    NOT NULL,
+    price               TEXT    NOT NULL,
+    price_cents         INTEGER NOT NULL,
+    vendor_code         TEXT,
+    category            TEXT,
+    warehouse           TEXT,
+    arrival_city        TEXT,
+    first_seen          TEXT    NOT NULL,
+    previous_order_key  TEXT,
+    next_order_key      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_article     ON orders(article);
@@ -56,11 +58,15 @@ def get_connection():
 def init_db():
     conn = get_connection()
     conn.executescript(SCHEMA)
-    # Migration: add vendor_code column if missing
     cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+    # Migration: add vendor_code column if missing
     if "vendor_code" not in cols:
         conn.execute("ALTER TABLE orders ADD COLUMN vendor_code TEXT")
-        conn.commit()
+    # Migration: neighbor keys (populated by monitor, diagnostic only — not unique)
+    for col in ("previous_order_key", "next_order_key"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT")
+    conn.commit()
     conn.close()
 
 
@@ -87,12 +93,48 @@ def parse_price_cents(price_str):
     return int(digits) * 100 if digits else None
 
 
-def _to_iso_dt(dt_str):
-    """Bot passes 'YYYY-MM-DD HH:MM:SS'; date_parsed is stored as 'YYYY-MM-DDTHH:MM:SS'.
-    Converts the former to the latter for SQL string comparison."""
-    if not dt_str:
-        return dt_str
-    return dt_str.replace(" ", "T", 1)
+def build_key(order):
+    """Dedup key: {vendor_code|A:article}#{size}#{qty}#{price_int}#{date_iso}#{city}#{warehouse}
+
+    Accepts orders in both shapes: live-scraped (has raw `date`, `price`, `quantity`)
+    and DB rows (has pre-parsed `date_parsed`, `price_cents`, raw `quantity`).
+    Falls back gracefully when fields are missing so it never crashes.
+    """
+    # vendor_code, fallback to A:{article}
+    vc = (order.get("vendor_code") or "").strip()
+    if not vc:
+        article = (order.get("article") or "").strip()
+        vc = f"A:{article}" if article else ""
+
+    size = (order.get("size") or "").strip()
+
+    # quantity -> numeric string; accepts "1 шт" or "1" or missing
+    qty_raw = order.get("quantity")
+    if qty_raw is None:
+        qty = ""
+    else:
+        qty = re.sub(r"\D", "", str(qty_raw))
+
+    # price_int from whichever form is available
+    if order.get("price_cents") is not None:
+        pc = int(order["price_cents"])
+    else:
+        pc = parse_price_cents(order.get("price")) or 0
+    price_int = str(pc // 100) if pc else ""
+
+    # date_iso: prefer pre-parsed; else parse raw; else raw string verbatim
+    date_iso = order.get("date_parsed")
+    if not date_iso:
+        parsed = parse_russian_date(order.get("date", ""))
+        date_iso = parsed.isoformat() if parsed else (order.get("date") or "")
+
+    city = (order.get("arrival_city") or "").strip()
+    warehouse = (order.get("warehouse") or "").strip()
+
+    parts = [vc, size, qty, price_int, date_iso, city, warehouse]
+    # Always strip '#' from fields so the separator never collides with content.
+    parts = [p.replace("#", "") if isinstance(p, str) else "" for p in parts]
+    return "#".join(parts)
 
 
 def upsert_order(order_dict):
@@ -106,8 +148,9 @@ def upsert_order(order_dict):
         cursor = conn.execute(
             """INSERT OR IGNORE INTO orders
                (key, article, product, size, quantity, status, date_raw, date_parsed,
-                price, price_cents, vendor_code, category, warehouse, arrival_city, first_seen)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                price, price_cents, vendor_code, category, warehouse, arrival_city, first_seen,
+                previous_order_key, next_order_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 order_dict["key"],
                 order_dict["article"],
@@ -124,10 +167,15 @@ def upsert_order(order_dict):
                 order_dict.get("warehouse"),
                 order_dict.get("arrival_city"),
                 first_seen,
+                order_dict.get("previous_order_key"),
+                order_dict.get("next_order_key"),
             ),
         )
         conn.commit()
-        return cursor.rowcount > 0
+        inserted = cursor.rowcount > 0
+        if not inserted:
+            print(f"  DUP SKIP: {order_dict['key']}")
+        return inserted
     finally:
         conn.close()
 
@@ -190,9 +238,9 @@ def get_stats():
     conn = get_connection()
     try:
         total = conn.execute("SELECT count(*) as c FROM orders").fetchone()["c"]
-        today_iso = datetime.now().strftime("%Y-%m-%dT00:00:00")
+        today = datetime.now().strftime("%Y-%m-%d")
         today_count = conn.execute(
-            "SELECT count(*) as c FROM orders WHERE date_parsed >= ?", (today_iso,)
+            "SELECT count(*) as c FROM orders WHERE first_seen >= ?", (today,)
         ).fetchone()["c"]
         by_status = conn.execute(
             "SELECT status, count(*) as c FROM orders GROUP BY status ORDER BY c DESC"
@@ -209,28 +257,24 @@ def get_stats():
 def get_totals(start_dt, end_dt):
     """Get order count and revenue totals for a time range.
 
-    Filters on `date_parsed` (when the seller actually got the order from
-    the WB UI), NOT on `first_seen` (when our scraper noticed). After scraper
-    downtime, first_seen clusters around catch-up time and totals get warped.
-
     Args:
-        start_dt: 'YYYY-MM-DD HH:MM:SS' (or ISO T-format — both work)
-        end_dt:   'YYYY-MM-DD HH:MM:SS' (or ISO T-format)
+        start_dt: datetime string (e.g. '2026-04-05 00:00:00')
+        end_dt: datetime string (e.g. '2026-04-05 23:59:59')
+
+    Returns dict with count, revenue_cents, by_status list.
     """
-    start_iso = _to_iso_dt(start_dt)
-    end_iso = _to_iso_dt(end_dt)
     conn = get_connection()
     try:
         row = conn.execute(
             "SELECT count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ?",
-            (start_iso, end_iso),
+            "FROM orders WHERE first_seen >= ? AND first_seen <= ?",
+            (start_dt, end_dt),
         ).fetchone()
         by_status = conn.execute(
             "SELECT status, count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ? "
+            "FROM orders WHERE first_seen >= ? AND first_seen <= ? "
             "GROUP BY status ORDER BY cnt DESC",
-            (start_iso, end_iso),
+            (start_dt, end_dt),
         ).fetchall()
         return {
             "count": row["cnt"],
@@ -242,17 +286,14 @@ def get_totals(start_dt, end_dt):
 
 
 def get_totals_by_article(start_dt, end_dt):
-    """Get order count and revenue grouped by article for a time range.
-    Filters on date_parsed — see get_totals docstring."""
-    start_iso = _to_iso_dt(start_dt)
-    end_iso = _to_iso_dt(end_dt)
+    """Get order count and revenue grouped by article for a time range."""
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT article, vendor_code, count(*) as cnt, coalesce(sum(price_cents), 0) as rev "
-            "FROM orders WHERE date_parsed >= ? AND date_parsed <= ? "
+            "FROM orders WHERE first_seen >= ? AND first_seen <= ? "
             "GROUP BY article ORDER BY cnt DESC",
-            (start_iso, end_iso),
+            (start_dt, end_dt),
         ).fetchall()
         return [(r["article"], r["vendor_code"] or "", r["cnt"], r["rev"]) for r in rows]
     finally:

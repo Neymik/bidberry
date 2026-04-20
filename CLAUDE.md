@@ -33,19 +33,16 @@ Default to using Bun instead of Node.js.
 
 ## Where work happens
 
-**All builds, restarts, log checks, CLI syncs, and endpoint tests run on `ssh ostapLace`, NOT on the local Mac.** The macOS checkout is only for editing and git. The Docker stack cannot be brought up locally — `docker-compose.yml` bind-mounts the WBPartners-Auto phone DB at `/home/ostap/WBPartners-Auto/orders.db`, which only exists on the server. Trying `docker compose up` on the Mac fails with "mounts denied".
+**Claude Code now runs directly on `ostapLase` (the production server).** The working directory `/home/ostap/bidberry` IS production. There is no local Mac checkout anymore and no `ssh ostapLase` indirection — edits, builds, log checks, CLI syncs, and endpoint tests all happen in this shell against live code. Be careful: changes are immediately one `docker compose up -d --build` away from affecting the running stack.
 
-Deploy workflow:
+Deploy workflow (in-place on this server):
 ```bash
-# From local Mac after editing:
-rsync -avz --exclude='node_modules/' --exclude='.git/' --exclude='*.log' \
-  ~/Documents/bidberry/ ostapLace:~/bidberry/
-ssh ostapLace 'cd ~/bidberry && docker compose up -d --build app'
+cd ~/bidberry && docker compose up -d --build app
 ```
 
-Then `ssh ostapLace` for everything below.
+The WBPartners-Auto phone DB at `./WBPartners-Auto/orders.db` is bind-mounted into the app container (WBPartners-Auto lives inside this repo as of 2026-04-20).
 
-## Docker (on ostapLace)
+## Docker (on ostapLase)
 
 - **Containers**: `wb-analytics-app` (Bun), `wb-analytics-mysql` (MySQL 8.0)
 - **Ports**: App `127.0.0.1:${APP_PORT:-3000}`, MySQL `127.0.0.1:${MYSQL_PORT:-3306}`
@@ -54,8 +51,8 @@ Then `ssh ostapLace` for everything below.
 - **CLI sync**: `docker exec wb-analytics-app bun run src/cli/sync.ts [command]`
 - **DB reset**: `docker compose down -v && docker compose up -d mysql`
 - App mounts Docker socket (`/var/run/docker.sock`) for emulator container management
-- App also mounts WBPartners-Auto phone DB read-only: `/home/ostap/WBPartners-Auto/orders.db:/mnt/wbpartners/orders.db:ro`
-- **Required env vars on `ostapLace` `~/bidberry/.env`** (deploy will fail loud if missing):
+- App also mounts WBPartners-Auto phone DB read-only: `./WBPartners-Auto/orders.db:/mnt/wbpartners/orders.db:ro`
+- **Required env vars on `ostapLase` `~/bidberry/.env`** (deploy will fail loud if missing):
   - `JWT_SECRET` — long random string (`openssl rand -hex 32`). Used to sign session JWTs. App refuses to start if this is unset or equal to `change-me-in-production`.
   - `TRIGGER_SECRET` — long random string. Required header `X-Trigger-Secret` on `/api/trigger/*` webhooks. WBPartners-Auto must use the SAME value (see WBPartners-Auto/.env).
 
@@ -175,14 +172,20 @@ Subdirectory `WBPartners-Auto/` — Python-based WB Partners mobile app automati
 
 - **Purpose**: Monitors WB Partners Android app order feed via uiautomator2, stores orders in SQLite, exposes Telegram bot + FastAPI REST API
 - **Stack**: Python + uiautomator2 + FastAPI + Telegram bot
-- **Docker**: Redroid (Android 11, API 30) emulator + ws-scrcpy web UI
+- **Primary mode**: Physical Huawei device connected to `ostapLase` via USB/ADB — this is the main way it runs. Docker/Redroid emulator is a fallback only.
 - **Entry points**: `wb_order_monitor.py` (full automation), `server.py` (API+bot only)
-- **Ports**: ADB `127.0.0.1:5555`, API `22001`, ws-scrcpy `22090`
-- **Docker commands**:
+- **Supervised by systemd**: `wb-monitor.service` on `ostapLase` — runs `/home/ostap/bidberry/WBPartners-Auto/venv/bin/python3 wb_order_monitor.py`. **After any code change under `./WBPartners-Auto/` (bot.py, wb_order_monitor.py, db.py, server.py, …) restart the service or the changes don't take effect — Python does not hot-reload:**
+  ```bash
+  sudo systemctl restart wb-monitor.service
+  sudo journalctl -u wb-monitor.service -f     # tail logs
+  ```
+- **Check device**: `adb devices` — if empty, the phone is disconnected or ADB is down
+- **Fallback (Docker)**: Redroid (Android 11, API 30) emulator + ws-scrcpy web UI
+- **Docker commands** (fallback only):
   - Start: `cd WBPartners-Auto && docker compose up -d`
   - Logs: `docker logs redroid`
   - ADB shell: `adb connect localhost:5555 && adb shell`
-  - Run monitor: `python WBPartners-Auto/wb_order_monitor.py`
+- **Run monitor**: `python WBPartners-Auto/wb_order_monitor.py`
 
 ## Wildberries API Notes
 

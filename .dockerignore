@@ -1,0 +1,9 @@
+node_modules
+.git
+.env
+.env.local
+exports
+*.log
+# WBPartners-Auto is a separate Python service; its DB is bind-mounted at runtime,
+# no need to ship Python source or runtime artifacts into the Bun app image.
+WBPartners-Auto

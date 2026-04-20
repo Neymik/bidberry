@@ -10,7 +10,7 @@ from typing import Optional
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Security, status
+from fastapi import FastAPI, HTTPException, Query, Security, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
@@ -26,9 +26,7 @@ from db import (
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
-# Bind to loopback by default. Override only if you have a real reason
-# to expose this API beyond the box (and you should still front it with auth).
-API_HOST = os.getenv("API_HOST", "127.0.0.1")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "22001"))
 
 START_TIME = time.time()
@@ -72,15 +70,11 @@ class HealthResponse(BaseModel):
 
 # --- Auth ---
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key")
 
 
 def verify_api_key(key: str = Security(api_key_header)):
-    if not API_KEY:
-        # Refuse to serve protected endpoints if the server itself has no key
-        # configured — better to fail loud than auto-allow.
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API_KEY not configured on server")
-    if not key or key != API_KEY:
+    if not API_KEY or key != API_KEY:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
 
@@ -103,12 +97,13 @@ def health():
     }
 
 
-@app.get("/orders", response_model=list[OrderResponse], dependencies=[Depends(verify_api_key)])
+@app.get("/orders", response_model=list[OrderResponse], dependencies=[Security(api_key_header)])
 def list_orders(
     limit: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    _key: str = Security(api_key_header),
 ):
     if status:
         rows = get_orders_by_status(status, limit)
@@ -119,16 +114,16 @@ def list_orders(
     return [dict(r) for r in rows]
 
 
-@app.get("/orders/{article}", response_model=list[OrderResponse], dependencies=[Depends(verify_api_key)])
-def orders_by_article(article: str):
+@app.get("/orders/{article}", response_model=list[OrderResponse])
+def orders_by_article(article: str, _key: str = Security(api_key_header)):
     rows = get_orders_by_article(article)
     if not rows:
         raise HTTPException(status_code=404, detail="No orders found for this article")
     return [dict(r) for r in rows]
 
 
-@app.get("/stats", response_model=StatsResponse, dependencies=[Depends(verify_api_key)])
-def stats():
+@app.get("/stats", response_model=StatsResponse)
+def stats(_key: str = Security(api_key_header)):
     s = get_stats()
     return {
         "total": s["total"],
@@ -137,10 +132,11 @@ def stats():
     }
 
 
-@app.get("/export/csv", dependencies=[Depends(verify_api_key)])
+@app.get("/export/csv")
 def export_csv(
     start_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    _key: str = Security(api_key_header),
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     start = start_date or today

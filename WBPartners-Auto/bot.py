@@ -78,8 +78,9 @@ async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = 5
     if context.args:
         try:
-            limit = max(1, min(int(context.args[0]), 50))
-        except (TypeError, ValueError):
+            limit = int(context.args[0])
+            limit = min(limit, 50)
+        except ValueError:
             pass
 
     orders = get_recent_orders(limit)
@@ -179,31 +180,46 @@ def _format_revenue(cents):
 
 def _fetch_bidberry_report():
     """GET the formatted cabinet report from bidberry backend.
-    Returns the message text or None if unavailable/empty."""
+
+    Returns a (status, payload) tuple so the caller can tell apart success,
+    "nothing to report", and failure — the three cases previously collapsed
+    into a silent None. Prior silence caused the /count format to change
+    under the user's feet with no explanation.
+
+    status values:
+      "ok"          — payload is the HTML message text
+      "empty"       — bidberry explicitly had no phone orders for today
+      "unconfigured"— BIDBERRY_CABINET_ID not set
+      "unavailable" — HTTP/network failure; payload is a short reason
+    """
     cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
     if not cabinet_id:
-        return None
-    secret = os.getenv("TRIGGER_SECRET")
-    if not secret:
-        print("  bidberry fetch skipped: TRIGGER_SECRET not set")
-        return None
+        return ("unconfigured", None)
     base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
     url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
+    secret = os.getenv("TRIGGER_SECRET", "")
+    headers = {"X-Trigger-Secret": secret} if secret else {}
     try:
         import requests
-        r = requests.get(url, timeout=10, headers={"X-Trigger-Secret": secret})
-        if r.status_code == 401:
-            print("  bidberry fetch rejected: TRIGGER_SECRET mismatch")
-            return None
+        r = requests.get(url, timeout=10, headers=headers)
         if not r.ok:
-            return None
+            body = (r.text or "")[:200].replace("\n", " ")
+            reason = f"HTTP {r.status_code}"
+            print(f"[count] bidberry unavailable: {reason} body={body!r}")
+            return ("unavailable", reason)
         data = r.json()
         if data.get("empty"):
-            return None
-        return data.get("text") or None
+            print("[count] bidberry returned empty (no phone orders today)")
+            return ("empty", None)
+        text = data.get("text") or None
+        if not text:
+            print(f"[count] bidberry returned no text field: {data!r}")
+            return ("unavailable", "no text in response")
+        return ("ok", text)
     except Exception as e:
-        print(f"  bidberry fetch failed: {e}")
-        return None
+        reason = f"{type(e).__name__}: {e}"
+        print(f"[count] bidberry fetch failed: {reason}")
+        return ("unavailable", reason)
 
 
 @restricted
@@ -212,13 +228,26 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
 
     # Default /count (no args) or today: fetch rich bidberry report
-    # (includes ad budget + CPO). Falls back to local SQLite summary.
+    # (includes ad budget + CPO). Falls back to local SQLite summary, but
+    # the user is told *why* the format changed — silent fallback previously
+    # looked like the command was returning random different answers.
+    fallback_banner = None
     if not args or args[0].lower() in ("today", "сегодня", "день"):
-        bidberry_text = _fetch_bidberry_report()
-        if bidberry_text:
-            await update.message.reply_text(bidberry_text, parse_mode="HTML")
+        status, payload = _fetch_bidberry_report()
+        if status == "ok":
+            await update.message.reply_text(payload, parse_mode="HTML")
             return
-        # Fallback: local SQLite summary
+        if status == "empty":
+            await update.message.reply_text(
+                "Сегодня заказов с телефона ещё не было."
+            )
+            return
+        # status in ("unavailable", "unconfigured") — degrade to local SQLite
+        # and prepend a banner so the user knows which data source they got.
+        if status == "unavailable":
+            fallback_banner = f"⚠️ bidberry недоступен ({payload}) — локальные данные"
+        else:
+            fallback_banner = "⚠️ bidberry не настроен — локальные данные"
         start = now.strftime("%Y-%m-%d") + " 00:00:00"
         end = now.strftime("%Y-%m-%d") + " 23:59:59"
         label = f"Сегодня ({now.strftime('%d.%m.%Y')})"
@@ -246,11 +275,14 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     by_article = get_totals_by_article(start, end)
     emoji_map = {"Заказ": "✅", "Отказ": "❌", "Выкуп": "💰", "Возврат": "↩️"}
 
-    lines = [
+    lines = []
+    if fallback_banner:
+        lines.append(f"<i>{fallback_banner}</i>\n")
+    lines.extend([
         f"📊 <b>Итоги: {label}</b>\n",
         f"Заказов: <b>{totals['count']}</b>",
         f"Сумма: <b>{_format_revenue(totals['revenue_cents'])}</b>\n",
-    ]
+    ])
     if totals["by_status"]:
         lines.append("<b>По статусам:</b>")
         for status, cnt, rev in totals["by_status"]:
@@ -263,11 +295,16 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not by_article:
         return
 
+    total_cnt = sum(cnt for _, _, cnt, _ in by_article)
+    total_rev = sum(rev for _, _, _, rev in by_article)
+
     if len(by_article) <= 3:
         # Send as text table
         table_lines = [f"<b>{label}</b>\n", "<b>Артикул | Арт.прод. | Кол-во | Сумма</b>"]
         for article, vc, cnt, rev in by_article:
             table_lines.append(f"<code>{article}</code> | {vc} | {cnt} шт | {_format_revenue(rev)}")
+        table_lines.append("──────────────")
+        table_lines.append(f"<b>Итого:</b> {total_cnt} шт | {_format_revenue(total_rev)}")
         await update.message.reply_text("\n".join(table_lines), parse_mode="HTML")
     else:
         # Send as CSV file
@@ -276,11 +313,12 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         writer.writerow(["Артикул", "Артикул продавца", "Кол-во заказов", "Сумма ₽"])
         for article, vc, cnt, rev in by_article:
             writer.writerow([article, vc, cnt, rev // 100])
+        writer.writerow(["ИТОГО", "", total_cnt, total_rev // 100])
         doc = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
         await update.message.reply_document(
             document=doc,
             filename=f"count_{label.replace(' ', '_')}.csv",
-            caption=f"📋 {len(by_article)} артикулов за {label}",
+            caption=f"📋 {len(by_article)} артикулов за {label} · Итого: {total_cnt} шт, {_format_revenue(total_rev)}",
         )
 
 
@@ -297,23 +335,40 @@ def build_app():
 
 
 def run_bot_thread():
-    """Start the bot in a daemon thread using manual polling (no signal handlers)."""
+    """Start the bot in a daemon thread using manual polling (no signal handlers).
+
+    Auto-restarts with backoff if initialize/polling dies — transient network
+    errors (httpx.ConnectError, Telegram SSL drops) shouldn't permanently kill
+    the bot while the order monitor keeps running.
+    """
     import threading
     import asyncio
+    import traceback
 
     async def _poll():
         app = build_app()
         await app.initialize()
         await app.updater.start_polling()
         await app.start()
-        # Keep running until thread is killed
         while True:
             await asyncio.sleep(1)
 
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(_poll())
+        backoff = 10
+        while True:
+            try:
+                loop.run_until_complete(_poll())
+            except Exception as e:
+                print(f"Telegram bot crashed: {e.__class__.__name__}: {e}")
+                traceback.print_exc()
+                print(f"Restarting bot in {backoff}s...")
+                import time
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+            else:
+                break
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

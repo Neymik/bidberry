@@ -13,21 +13,36 @@ from datetime import datetime
 from xml.etree import ElementTree
 from dotenv import load_dotenv
 
-from db import init_db, upsert_order, get_all_keys
+from db import init_db, upsert_order, get_all_keys, build_key
 from bot import run_bot_thread
 from api import run_api_thread
 
 load_dotenv()
+
+# Fix socks proxy scheme for httpx compatibility
+_all_proxy = os.environ.get("ALL_PROXY", "") or os.environ.get("all_proxy", "")
+if _all_proxy.startswith("socks://"):
+    fixed = _all_proxy.replace("socks://", "socks5://", 1)
+    os.environ["ALL_PROXY"] = fixed
+    os.environ["all_proxy"] = fixed
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 REFRESH_INTERVAL = 180  # seconds between refreshes (3 min)
 SCROLL_PAUSE = 2
-MAX_SCROLLS = 10
+MAX_SCROLLS = 300  # hard safety cap — real exit is boundary (known key) or crossing today's midnight
+NO_PROGRESS_LIMIT = 3  # scrolls without any new card → break + warn
 
 # Required fields — skip partially rendered cards
 REQUIRED_FIELDS = ("article", "status", "date", "price")
+
+# Recovery state (module-level so handle_error_state can escalate across cycles)
+_consecutive_errors = 0
+_last_stuck_alert_ts = 0.0  # for rate-limiting the "could not recover" Telegram alert
+_recovering = False         # re-entrancy guard: handle_error_state calls navigate_to_orders
+                            # at tier 2+, and navigate_to_orders calls handle_error_state —
+                            # without this flag one failed cycle would burn through all tiers.
 
 
 def trigger_bidberry_report():
@@ -36,43 +51,24 @@ def trigger_bidberry_report():
     cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
     if not cabinet_id:
         return
-    secret = os.getenv("TRIGGER_SECRET")
-    if not secret:
-        print("  bidberry trigger skipped: TRIGGER_SECRET not set")
-        return
     base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
     url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
     try:
         # Short timeout: the endpoint returns 202 immediately
-        r = requests.post(url, timeout=3, headers={"X-Trigger-Secret": secret})
-        if r.status_code == 401:
-            print("  bidberry trigger rejected: TRIGGER_SECRET mismatch")
-        elif not r.ok:
-            print(f"  bidberry trigger failed: HTTP {r.status_code}")
+        requests.post(url, timeout=3)
     except Exception as e:
         print(f"  bidberry trigger failed: {e}")
 
 
-def send_telegram(text, max_attempts=3):
-    """Send a message to Telegram. Returns True on success, False otherwise.
-
-    Retries with exponential backoff (2s, 4s, 8s) before giving up. The caller
-    decides whether to mark the related order as 'known' based on the result —
-    a failed send must NOT cause us to skip the next cycle's retry.
-    """
+def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    for attempt in range(1, max_attempts + 1):
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.ok:
-                return True
-            print(f"  Telegram error (attempt {attempt}/{max_attempts}): {resp.status_code} {resp.text[:200]}")
-        except Exception as e:
-            print(f"  Telegram send failed (attempt {attempt}/{max_attempts}): {e}")
-        if attempt < max_attempts:
-            time.sleep(2 ** attempt)  # 2, 4, 8
-    return False
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if not resp.ok:
+            print(f"  Telegram error: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"  Telegram send failed: {e}")
 
 
 def format_order_message(order):
@@ -104,17 +100,153 @@ def connect_device():
     return d
 
 
+def _adb_force_stop(package):
+    serial = os.getenv("ANDROID_DEVICE", "")
+    cmd = ["adb"]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += ["shell", "am", "force-stop", package]
+    subprocess.run(cmd, capture_output=True)
+
+
+def _adb_shell(args):
+    """Run an `adb shell` command against the configured device. Returns CompletedProcess."""
+    serial = os.getenv("ANDROID_DEVICE", "")
+    cmd = ["adb"]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += ["shell"] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+# Network-recovery rate limit (seconds). Prevents thrashing wifi if issue is WB backend side.
+NETWORK_RECOVERY_COOLDOWN = 600
+_last_network_recovery_ts = 0.0
+
+
+def try_network_recovery(reason: str) -> bool:
+    """Attempt phone-side network recovery (observed to fix the monitor after the 2026-04-18 outage):
+
+      1. `svc usb setFunctions adb` — drops MTP/mass_storage so charger can pull higher current
+         while keeping ADB alive. Cheap and idempotent.
+      2. `svc wifi disable` + `svc wifi enable` — breaks ASSOCIATING loops where the supplicant
+         is stuck cycling on the same SSID without ever completing handshake.
+
+    Rate-limited to NETWORK_RECOVERY_COOLDOWN (10 min) so if WB's backend is down we don't
+    keep slamming the radios. Returns True if recovery ran, False if rate-limited.
+    """
+    global _last_network_recovery_ts
+    now = time.time()
+    if now - _last_network_recovery_ts < NETWORK_RECOVERY_COOLDOWN:
+        remaining = int(NETWORK_RECOVERY_COOLDOWN - (now - _last_network_recovery_ts))
+        print(f"  Network recovery skipped (cooldown: {remaining}s left)")
+        return False
+    _last_network_recovery_ts = now
+
+    print(f"  🔧 Network recovery ({reason})")
+    send_telegram(
+        f"🔧 WB Monitor: пробую восстановить связь ({reason}). "
+        f"USB → ADB-only (для зарядки), Wi-Fi перезапуск."
+    )
+    # USB first — no network disruption, higher charging current
+    _adb_shell(["svc", "usb", "setFunctions", "adb"])
+    # Wifi restart — breaks supplicant ASSOCIATING loops
+    _adb_shell(["svc", "wifi", "disable"])
+    time.sleep(2)
+    _adb_shell(["svc", "wifi", "enable"])
+    time.sleep(8)  # give the supplicant time to associate and pick up DHCP
+    return True
+
+
+def _is_error_screen(d):
+    """True if the WB Partners error screen ("Что-то пошло не так" + Обновить) is showing."""
+    if d(text="Что-то пошло не так").exists(timeout=1):
+        return True
+    # Fallback: Обновить alone (e.g. caption briefly off-screen)
+    return d(text="Обновить").exists(timeout=1)
+
+
 def handle_error_state(d):
     """Detect and recover from WB Partners error screens.
-    Returns True if an error was handled (caller should re-navigate)."""
-    # "Что-то пошло не так" error screen with Обновить button
-    refresh_btn = d(text="Обновить")
-    if refresh_btn.exists(timeout=1):
-        print("  Error screen detected, tapping Обновить...")
-        refresh_btn.click()
+
+    Escalates on consecutive failures: tap → re-navigate → app restart → ADB force-stop.
+    Returns True if an error was detected and a recovery step was taken."""
+    global _consecutive_errors, _last_stuck_alert_ts, _recovering
+
+    if _recovering:
+        # Called re-entrantly (from navigate_to_orders inside an escalation) — skip
+        return False
+
+    if not _is_error_screen(d):
+        return False
+
+    _consecutive_errors += 1
+    attempt = _consecutive_errors
+    print(f"  Error screen detected (attempt {attempt}), recovering...")
+
+    _recovering = True
+    try:
+        _do_recovery(d, attempt)
+    finally:
+        _recovering = False
+    return True
+
+
+def _do_recovery(d, attempt):
+    global _last_stuck_alert_ts
+    if attempt <= 2:
+        # Tier 1: tap "Обновить" and wait
+        btn = d(text="Обновить")
+        if btn.exists(timeout=1):
+            btn.click()
         time.sleep(3)
-        return True
-    return False
+    elif attempt == 3:
+        # Tier 2: re-enter feed via dashboard carousel
+        print("  Escalating: re-navigating via dashboard...")
+        send_telegram(
+            f"\U0001f504 WB Monitor: восстановление после ошибки (попытка {attempt}/5)"
+        )
+        navigate_to_orders(d)
+    elif attempt == 4:
+        # Tier 3: try network recovery first (often the root cause), then restart the app
+        try_network_recovery(f"app error recovery attempt {attempt}")
+        print("  Escalating: app_stop + app_start...")
+        try:
+            d.app_stop("wb.partners")
+            time.sleep(2)
+            d.app_start("wb.partners")
+            time.sleep(5)
+        except Exception as e:
+            print(f"  app restart failed: {e}")
+        navigate_to_orders(d)
+    else:
+        # Tier 4 (attempt >= 5): hard force-stop via ADB + cold start
+        print("  Escalating: ADB force-stop + cold start...")
+        _adb_force_stop("wb.partners")
+        time.sleep(2)
+        try:
+            d.app_start("wb.partners")
+            time.sleep(5)
+        except Exception as e:
+            print(f"  cold start failed: {e}")
+        navigate_to_orders(d)
+
+        # Rate-limit the "stuck" alert to once per 30 min so we don't spam
+        now_ts = time.time()
+        if now_ts - _last_stuck_alert_ts > 1800:
+            send_telegram(
+                f"\u26a0\ufe0f WB Monitor: не удалось восстановиться после {attempt} попыток. "
+                "Проверь телефон."
+            )
+            _last_stuck_alert_ts = now_ts
+
+
+def reset_error_counter():
+    """Call after a successful parse to clear the escalation counter."""
+    global _consecutive_errors
+    if _consecutive_errors:
+        print(f"  Recovered (was {_consecutive_errors} consecutive errors)")
+    _consecutive_errors = 0
 
 
 def navigate_to_orders(d):
@@ -197,9 +329,31 @@ def adb_swipe(x1, y1, x2, y2, dur=300):
 
 
 def pull_to_refresh(d):
+    """Trigger pull-to-refresh and wait for the feed to actually update.
+
+    Exits early either when the top card key changes (new content arrived) or
+    when the top card is stable for STABLE_AFTER seconds with no error screen.
+    Worst case: 10s deadline then fall through.
+    """
     w, h = d.window_size()
+    before_top = _top_card_key(d)
     adb_swipe(w // 2, int(h * 0.4), w // 2, int(h * 0.8), 300)
-    time.sleep(3)
+
+    start = time.time()
+    MAX_WAIT = 10.0
+    STABLE_AFTER = 2.0  # require 2s of "nothing new" before declaring done
+    while (time.time() - start) < MAX_WAIT:
+        time.sleep(0.5)
+        after_top = _top_card_key(d)
+        elapsed = time.time() - start
+        if after_top and after_top != before_top:
+            return  # new top card arrived
+        if elapsed >= STABLE_AFTER and after_top and not _is_error_screen(d):
+            return  # stable top card, not an error → assume done with no new content
+    print("  pull_to_refresh: deadline exceeded, continuing anyway")
+
+
+_last_parse_reason = "ok"  # "ok" | "error_screen" | "no_container" | "empty_feed"
 
 
 def parse_orders_from_hierarchy(d):
@@ -207,11 +361,23 @@ def parse_orders_from_hierarchy(d):
 
     Page structure: scrollable container has flat children — wb_image Views
     separate order cards. Text fields use labeled pairs (e.g., "Дата оформления" + value).
+
+    Sets module-level `_last_parse_reason` so callers can tell WHY a parse
+    returned an empty list ("error_screen" / "no_container" / "empty_feed" / "ok").
     """
+    global _last_parse_reason
     xml_str = d.dump_hierarchy()
+
+    # Fast bail-out: error screen has no scrollable feed — skip the full scroll loop
+    if "Что-то пошло не так" in xml_str:
+        print("  Error screen visible in hierarchy — skipping parse")
+        _last_parse_reason = "error_screen"
+        return []
+
     root = ElementTree.fromstring(xml_str)
 
     orders = []
+    dropped_incomplete = 0
 
     # Find scrollable container in wb.partners
     scrollable = None
@@ -222,6 +388,7 @@ def parse_orders_from_hierarchy(d):
 
     if scrollable is None:
         print("  Warning: scrollable container not found")
+        _last_parse_reason = "no_container"
         return orders
 
     # Each direct child of scrollable is a complete order card (View wrapping
@@ -234,6 +401,7 @@ def parse_orders_from_hierarchy(d):
                 texts.append(text)
 
         if len(texts) < 4:
+            dropped_incomplete += 1
             continue
 
         order = {}
@@ -278,24 +446,61 @@ def parse_orders_from_hierarchy(d):
         # Skip incomplete cards
         missing = [f for f in REQUIRED_FIELDS if not order.get(f)]
         if missing:
+            dropped_incomplete += 1
             continue
 
-        order["key"] = f"{order['article']}_{order.get('size', '')}_{order['date']}"
+        order["key"] = build_key(order)
         orders.append(order)
 
+    # Second pass: record each card's neighbors in this dump (diagnostic fields,
+    # not part of the unique key). Scoped to one hierarchy dump — no cross-scroll bookkeeping.
+    for i, o in enumerate(orders):
+        o["previous_order_key"] = orders[i - 1]["key"] if i > 0 else None
+        o["next_order_key"]     = orders[i + 1]["key"] if i + 1 < len(orders) else None
+
+    if dropped_incomplete:
+        print(f"  Parsed {len(orders)} cards, dropped {dropped_incomplete} incomplete")
+    _last_parse_reason = "ok" if orders else "empty_feed"
     return orders
 
 
+def _top_card_key(d):
+    """Best-effort: return the key of the topmost visible card, or None."""
+    try:
+        orders = parse_orders_from_hierarchy(d)
+        return orders[0]["key"] if orders else None
+    except Exception:
+        return None
+
+
+def _today_msk_midnight():
+    return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def collect_new_orders(d, known_keys):
-    """Scroll down until a known order is found (boundary), collecting new orders.
+    """Scroll down collecting new orders until one of:
+      (a) a known-key boundary is hit in the feed (steady-state — usually 1–2 scrolls),
+      (b) the oldest visible parsed date drops below today's 00:00 MSK (covered full day),
+      (c) NO_PROGRESS_LIMIT consecutive scrolls produced zero new cards (feed misbehaving),
+      (d) MAX_SCROLLS hard safety cap (should never fire in practice).
 
     Returns list of new orders in chronological order (oldest first).
     """
-    new_orders = {}  # key -> order, preserves discovery order (newest first)
+    from db import parse_russian_date  # local import to avoid top-level coupling
+
+    new_orders = {}  # key -> order, discovery order (newest first)
+    cutoff = _today_msk_midnight()
+    no_progress = 0
+    retry_mins = REFRESH_INTERVAL // 60
+    # Track parse reasons across scrolls; the dominant one when we bail tells us why.
+    reason_counts = {"error_screen": 0, "no_container": 0, "empty_feed": 0, "ok": 0}
 
     for scroll_i in range(MAX_SCROLLS + 1):
         orders = parse_orders_from_hierarchy(d)
+        reason_counts[_last_parse_reason] = reason_counts.get(_last_parse_reason, 0) + 1
         hit_boundary = False
+        added_this_scroll = 0
+        oldest_on_screen = None
 
         for o in orders:
             key = o["key"]
@@ -303,15 +508,76 @@ def collect_new_orders(d, known_keys):
                 hit_boundary = True
             elif key not in new_orders:
                 new_orders[key] = o
+                added_this_scroll += 1
+
+            parsed = parse_russian_date(o.get("date", ""))
+            if parsed and (oldest_on_screen is None or parsed < oldest_on_screen):
+                oldest_on_screen = parsed
 
         if hit_boundary:
-            print(f"  Boundary found at scroll {scroll_i} ({len(new_orders)} new above)")
+            print(f"  Boundary (known key) at scroll {scroll_i} ({len(new_orders)} new)")
             break
+
+        if oldest_on_screen is not None and oldest_on_screen < cutoff:
+            print(f"  Boundary (crossed today 00:00 MSK) at scroll {scroll_i} "
+                  f"(oldest visible: {oldest_on_screen}, {len(new_orders)} new)")
+            break
+
+        # Fast-bail on error screen: no point scrolling 3 times when we know the app is broken.
+        # The main loop's handle_error_state will escalate recovery on next cycle.
+        if _last_parse_reason == "error_screen":
+            print(f"  ⚠️ WB Partners error screen — aborting scan (scroll {scroll_i})")
+            # Try network recovery — often the "error screen" is really a dead network
+            # (seen on 2026-04-18: wifi stuck ASSOCIATING, LTE unreachable). Rate-limited.
+            try_network_recovery("error screen in feed")
+            send_telegram(
+                f"⚠️ WB Partners показывает экран ошибки. "
+                f"Монитор пытается восстановиться автоматически и повторит через {retry_mins} мин."
+            )
+            break
+
+        if added_this_scroll == 0:
+            no_progress += 1
+            if no_progress >= NO_PROGRESS_LIMIT:
+                # Pick message based on dominant failure reason across the scan
+                error_n = reason_counts.get("error_screen", 0)
+                container_n = reason_counts.get("no_container", 0)
+                empty_n = reason_counts.get("empty_feed", 0)
+                if error_n >= no_progress // 2 + 1:
+                    try_network_recovery("persistent error screen")
+                    tg_msg = (f"⚠️ WB Partners показывает экран ошибки. "
+                              f"Монитор пытается восстановиться автоматически, повтор через {retry_mins} мин.")
+                elif container_n + empty_n >= no_progress:
+                    try_network_recovery("feed not loading")
+                    tg_msg = (f"⚠️ Лента заказов не загружается (похоже пропала связь). "
+                              f"Пробую перезапустить Wi-Fi и USB, повтор через {retry_mins} мин. "
+                              f"Если повторяется — проверь телефон (зарядка, интернет, WB Partners).")
+                else:
+                    tg_msg = (f"⚠️ Лента заказов не прокручивается. "
+                              f"Собрано {len(new_orders)} заказов, пропускаю остаток, повтор через {retry_mins} мин.")
+                print(f"  ⚠️ collect_new_orders stopped: no_progress={no_progress} "
+                      f"reasons={reason_counts} scroll_i={scroll_i}")
+                send_telegram(tg_msg)
+                break
+        else:
+            no_progress = 0
 
         if scroll_i < MAX_SCROLLS:
             w, h = d.window_size()
-            adb_swipe(w // 2, int(h * 0.75), w // 2, int(h * 0.3), 300)
+            # Overlap swipe (~30% screen = ~one card height) so each card appears in two
+            # consecutive dumps — half-rendered cards get a second chance to pass REQUIRED_FIELDS.
+            adb_swipe(w // 2, int(h * 0.70), w // 2, int(h * 0.40), 300)
             time.sleep(SCROLL_PAUSE)
+        if scroll_i and scroll_i % 20 == 0:
+            print(f"  ... scroll {scroll_i}, collected {len(new_orders)} new")
+    else:
+        print(f"  ⚠️ collect_new_orders: hit MAX_SCROLLS ({MAX_SCROLLS}) safety cap "
+              f"(collected {len(new_orders)} new)")
+        send_telegram(
+            f"⚠️ Слишком большой разрыв в ленте: проскроллил {MAX_SCROLLS} экранов и не нашёл "
+            f"уже известный заказ. Сохраняю {len(new_orders)} собранных, повтор через {retry_mins} мин. "
+            f"Если повторится — возможно нужен ручной recount_today."
+        )
 
     # Reverse: orders were collected newest-first (top of feed), return oldest-first
     return list(reversed(new_orders.values()))
@@ -357,58 +623,70 @@ def main():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n--- Cycle {cycle} at {now} ---")
 
-        # Recover from error screens before trying to refresh
-        if handle_error_state(d):
-            navigate_to_orders(d)
+        new_orders = []
+        parse_ok = False
+        # Up to 2 refresh→parse attempts: if an error appears mid-cycle, recover and re-parse
+        # immediately instead of losing REFRESH_INTERVAL seconds waiting for next cycle.
+        for attempt in range(2):
+            # Recover from any error screen before refreshing
+            if handle_error_state(d):
+                # handle_error_state already re-navigated at tier 2+; at tier 1 just re-check feed
+                if _consecutive_errors <= 2:
+                    navigate_to_orders(d)
 
-        print("  Refreshing feed...")
-        pull_to_refresh(d)
+            print("  Refreshing feed...")
+            pull_to_refresh(d)
 
-        # Scroll to top
-        w, h = d.window_size()
-        for _ in range(3):
-            adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
-            time.sleep(0.5)
-        time.sleep(1)
+            # Error may have appeared as a result of the refresh itself
+            if handle_error_state(d):
+                continue  # retry the full refresh sequence
 
-        print("  Scanning for new orders...")
-        new_orders = collect_new_orders(d, known_keys)
+            # Scroll to top
+            w, h = d.window_size()
+            for _ in range(3):
+                adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
+                time.sleep(0.5)
+            time.sleep(1)
 
-        # Re-navigate if nothing was parsed at all (wrong screen)
-        if not new_orders and not known_keys:
+            print("  Scanning for new orders...")
+            new_orders = collect_new_orders(d, known_keys)
+
+            # If parse returned empty AND the screen is actually an error, recover and retry
+            if not new_orders and _is_error_screen(d):
+                handle_error_state(d)
+                continue
+
+            parse_ok = True
+            break
+
+        # Re-navigate if nothing was parsed at all on first run (wrong screen, not an error)
+        if parse_ok and not new_orders and not known_keys:
             print("  No orders visible — re-navigating to Лента заказов...")
             navigate_to_orders(d)
             time.sleep(2)
             new_orders = collect_new_orders(d, known_keys)
 
-        # Upsert new orders to DB unconditionally. `collect_new_orders` already
-        # filters by `known_keys`, so every element of `new_orders` is one we
-        # haven't successfully sent yet — either because it's genuinely new OR
-        # because a previous cycle's Telegram send failed and the order is now
-        # persistent in the DB but pending notification. We pass ALL of them
-        # to the send loop; `known_keys` is the single source of truth for
-        # "notification confirmed".
+        if parse_ok:
+            reset_error_counter()
+
+        # Save new orders to DB (oldest first)
+        saved_orders = []
         for order in new_orders:
             order["first_seen"] = now
-            upsert_order(order)  # INSERT OR IGNORE — return value ignored
+            if upsert_order(order):
+                saved_orders.append(order)
+                known_keys.add(order["key"])
+        new_orders = saved_orders
 
         if new_orders:
-            # Count new-to-DB (first-time) vs retry for logging clarity
-            new_count = len(new_orders)
-            print(f"\n  *** {new_count} ORDER(S) PENDING NOTIFICATION ***")
-            any_sent = False
+            print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
             for o in new_orders:
                 msg = format_order_message(o)
                 print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
-                if send_telegram(msg):
-                    known_keys.add(o["key"])
-                    any_sent = True
-                else:
-                    print(f"  WARN: Telegram send failed for {o.get('key')} — will retry next cycle")
+                send_telegram(msg)
                 time.sleep(0.5)
-            # Only trigger bidberry if at least one notification landed this cycle
-            if any_sent:
-                trigger_bidberry_report()
+            # Trigger bidberry cabinet report for realtime summary update
+            trigger_bidberry_report()
         else:
             print("  No new orders")
 
