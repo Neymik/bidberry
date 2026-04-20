@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily bidberry backup schedule (04:00 Europe/Moscow)
+Requires=bidberry-backup.service
+
+[Timer]
+# Local time = Europe/Moscow on this host
+OnCalendar=*-*-* 04:00:00
+# Fire on boot if a scheduled run was missed
+Persistent=true
+# Randomize by up to 5 minutes to avoid exact-clock collisions
+RandomizedDelaySec=300
+Unit=bidberry-backup.service
+
+[Install]
+WantedBy=timers.target

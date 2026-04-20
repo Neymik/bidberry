@@ -1,0 +1,23 @@
+[Unit]
+Description=Bidberry daily backup to S3-compatible storage
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ostap
+Group=ostap
+# S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION
+EnvironmentFile=/etc/bidberry-backup.env
+# Optional proxy for Telegram notifier (api.telegram.org is blocked from RU).
+# wb-monitor.service uses socks5://127.0.0.1:1080 — mirror here.
+Environment=TELEGRAM_PROXY_URL=socks5://127.0.0.1:1080
+ExecStart=/home/ostap/bidberry/scripts/backup/backup.sh
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target
