@@ -8,9 +8,10 @@ from functools import wraps
 
 from dotenv import load_dotenv
 from telegram import Update
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from db import get_recent_orders, get_orders_by_status, get_orders_by_date_range, get_stats, get_totals, get_totals_by_article
+from db import get_recent_orders, get_orders_by_status, get_orders_by_date_range, get_stats
 
 load_dotenv()
 
@@ -178,7 +179,7 @@ def _format_revenue(cents):
     return " ".join(reversed(parts)) + " ₽"
 
 
-def _fetch_bidberry_report():
+def _fetch_bidberry_report(start=None, end=None, label=None):
     """GET the formatted cabinet report from bidberry backend.
 
     Returns a (status, payload) tuple so the caller can tell apart success,
@@ -186,9 +187,14 @@ def _fetch_bidberry_report():
     into a silent None. Prior silence caused the /count format to change
     under the user's feet with no explanation.
 
+    When start/end/label are all provided, they're forwarded as query params
+    so the same rich format (orders tel/API | budget | CPO) is returned for
+    any MSK wall-clock window — not just "today". All three must be set or
+    all must be None.
+
     status values:
       "ok"          — payload is the HTML message text
-      "empty"       — bidberry explicitly had no phone orders for today
+      "empty"       — bidberry explicitly had no phone orders in the window
       "unconfigured"— BIDBERRY_CABINET_ID not set
       "unavailable" — HTTP/network failure; payload is a short reason
     """
@@ -199,9 +205,12 @@ def _fetch_bidberry_report():
     url = f"{base}/api/trigger/cabinet-report/{cabinet_id}"
     secret = os.getenv("TRIGGER_SECRET", "")
     headers = {"X-Trigger-Secret": secret} if secret else {}
+    params = {}
+    if start and end and label:
+        params = {"start": start, "end": end, "label": label}
     try:
         import requests
-        r = requests.get(url, timeout=10, headers=headers)
+        r = requests.get(url, timeout=10, headers=headers, params=params)
         if not r.ok:
             body = (r.text or "")[:200].replace("\n", " ")
             reason = f"HTTP {r.status_code}"
@@ -209,7 +218,7 @@ def _fetch_bidberry_report():
             return ("unavailable", reason)
         data = r.json()
         if data.get("empty"):
-            print("[count] bidberry returned empty (no phone orders today)")
+            print("[count] bidberry returned empty (no phone orders in window)")
             return ("empty", None)
         text = data.get("text") or None
         if not text:
@@ -227,99 +236,72 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     args = context.args or []
 
-    # Default /count (no args) or today: fetch rich bidberry report
-    # (includes ad budget + CPO). Falls back to local SQLite summary, but
-    # the user is told *why* the format changed — silent fallback previously
-    # looked like the command was returning random different answers.
-    fallback_banner = None
+    # All /count variants go through the same bidberry endpoint so they return
+    # the same rich format (orders tel/API | budget | CPO). Backend ranges are
+    # half-open MSK wall-clock: [start, end).
     if not args or args[0].lower() in ("today", "сегодня", "день"):
-        status, payload = _fetch_bidberry_report()
-        if status == "ok":
-            await update.message.reply_text(payload, parse_mode="HTML")
-            return
-        if status == "empty":
-            await update.message.reply_text(
-                "Сегодня заказов с телефона ещё не было."
-            )
-            return
-        # status in ("unavailable", "unconfigured") — degrade to local SQLite
-        # and prepend a banner so the user knows which data source they got.
-        if status == "unavailable":
-            fallback_banner = f"⚠️ bidberry недоступен ({payload}) — локальные данные"
-        else:
-            fallback_banner = "⚠️ bidberry не настроен — локальные данные"
-        start = now.strftime("%Y-%m-%d") + " 00:00:00"
-        end = now.strftime("%Y-%m-%d") + " 23:59:59"
-        label = f"Сегодня ({now.strftime('%d.%m.%Y')})"
+        start = end = label = None  # backend default: MSK midnight..next midnight
+        user_label = "сегодня"
     elif args[0].lower() in ("hour", "час"):
-        # Last hour
         hour_ago = now - timedelta(hours=1)
         start = hour_ago.strftime("%Y-%m-%d %H:%M:%S")
         end = now.strftime("%Y-%m-%d %H:%M:%S")
         label = f"Последний час ({hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')})"
+        user_label = label
     elif len(args) == 1:
-        # Single date
-        start = args[0] + " 00:00:00"
-        end = args[0] + " 23:59:59"
+        try:
+            d = datetime.strptime(args[0], "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text("Формат даты: ГГГГ-ММ-ДД")
+            return
+        start = d.strftime("%Y-%m-%d 00:00:00")
+        end = (d + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
         label = args[0]
+        user_label = args[0]
     elif len(args) >= 2:
-        # Date range
-        start = args[0] + " 00:00:00"
-        end = args[1] + " 23:59:59"
+        try:
+            d1 = datetime.strptime(args[0], "%Y-%m-%d")
+            d2 = datetime.strptime(args[1], "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text("Формат даты: ГГГГ-ММ-ДД ГГГГ-ММ-ДД")
+            return
+        if d2 < d1:
+            await update.message.reply_text("Конечная дата раньше начальной.")
+            return
+        start = d1.strftime("%Y-%m-%d 00:00:00")
+        end = (d2 + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
         label = f"{args[0]} — {args[1]}"
+        user_label = label
     else:
         await update.message.reply_text("Формат: /count [hour|ГГГГ-ММ-ДД|ГГГГ-ММ-ДД ГГГГ-ММ-ДД]")
         return
 
-    totals = get_totals(start, end)
-    by_article = get_totals_by_article(start, end)
-    emoji_map = {"Заказ": "✅", "Отказ": "❌", "Выкуп": "💰", "Возврат": "↩️"}
-
-    lines = []
-    if fallback_banner:
-        lines.append(f"<i>{fallback_banner}</i>\n")
-    lines.extend([
-        f"📊 <b>Итоги: {label}</b>\n",
-        f"Заказов: <b>{totals['count']}</b>",
-        f"Сумма: <b>{_format_revenue(totals['revenue_cents'])}</b>\n",
-    ])
-    if totals["by_status"]:
-        lines.append("<b>По статусам:</b>")
-        for status, cnt, rev in totals["by_status"]:
-            e = emoji_map.get(status, "❓")
-            lines.append(f"  {e} {status}: {cnt} шт — {_format_revenue(rev)}")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    # Article summary table
-    if not by_article:
-        return
-
-    total_cnt = sum(cnt for _, _, cnt, _ in by_article)
-    total_rev = sum(rev for _, _, _, rev in by_article)
-
-    if len(by_article) <= 3:
-        # Send as text table
-        table_lines = [f"<b>{label}</b>\n", "<b>Артикул | Арт.прод. | Кол-во | Сумма</b>"]
-        for article, vc, cnt, rev in by_article:
-            table_lines.append(f"<code>{article}</code> | {vc} | {cnt} шт | {_format_revenue(rev)}")
-        table_lines.append("──────────────")
-        table_lines.append(f"<b>Итого:</b> {total_cnt} шт | {_format_revenue(total_rev)}")
-        await update.message.reply_text("\n".join(table_lines), parse_mode="HTML")
-    else:
-        # Send as CSV file
-        buf = io.StringIO()
-        writer = csv.writer(buf, delimiter=";")
-        writer.writerow(["Артикул", "Артикул продавца", "Кол-во заказов", "Сумма ₽"])
-        for article, vc, cnt, rev in by_article:
-            writer.writerow([article, vc, cnt, rev // 100])
-        writer.writerow(["ИТОГО", "", total_cnt, total_rev // 100])
-        doc = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
-        await update.message.reply_document(
-            document=doc,
-            filename=f"count_{label.replace(' ', '_')}.csv",
-            caption=f"📋 {len(by_article)} артикулов за {label} · Итого: {total_cnt} шт, {_format_revenue(total_rev)}",
+    status, payload = _fetch_bidberry_report(start=start, end=end, label=label)
+    if status == "ok":
+        await update.message.reply_text(payload, parse_mode="HTML")
+    elif status == "empty":
+        await update.message.reply_text(f"Нет заказов с телефона за {user_label}.")
+    elif status == "unconfigured":
+        await update.message.reply_text(
+            "⚠️ BIDBERRY_CABINET_ID не настроен в WBPartners-Auto/.env"
         )
+    else:
+        await update.message.reply_text(f"⚠️ bidberry недоступен: {payload}")
+
+
+async def _on_error(update, context):
+    """Surface handler errors in monitor.log instead of silently swallowing them.
+
+    Without this, a 429 (RetryAfter) raised from inside a CommandHandler gets
+    absorbed by PTB's default error path and the user sees the bot "ignore"
+    the command. Preventing 429s upstream (send_telegram retry + batching) is
+    the real fix; this handler just ensures residual failures are visible.
+    """
+    err = context.error
+    if isinstance(err, RetryAfter):
+        print(f"  bot.py RetryAfter: {err.retry_after}s (reply dropped)")
+    else:
+        print(f"  bot.py handler error: {type(err).__name__}: {err}")
 
 
 def build_app():
@@ -331,6 +313,7 @@ def build_app():
     app.add_handler(CommandHandler("count", count_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("csv", csv_cmd))
+    app.add_error_handler(_on_error)
     return app
 
 

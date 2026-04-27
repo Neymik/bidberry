@@ -23,9 +23,26 @@ function formatRubles(amount: number): string {
 }
 
 /**
- * Build the report text for a cabinet. Returns null if there's nothing to report.
+ * Optional explicit MSK wall-clock window for the report. `start`/`end` are
+ * "YYYY-MM-DD HH:mm:ss" SQL format (half-open: start inclusive, end exclusive).
+ * `label` is what appears in the message header instead of the default
+ * "now МСК" stamp.
  */
-export async function generateCabinetReport(cabinetId: number): Promise<string | null> {
+export type ReportRange = {
+  start: string;
+  end: string;
+  label: string;
+};
+
+/**
+ * Build the report text for a cabinet. Returns null if there's nothing to report.
+ * Without `range`, reports on "today from Moscow midnight" (the default the
+ * scheduler and trigger webhook use).
+ */
+export async function generateCabinetReport(
+  cabinetId: number,
+  range?: ReportRange,
+): Promise<string | null> {
   const cabinet = await cabinetsRepo.getCabinetById(cabinetId);
   if (!cabinet) return null;
 
@@ -35,14 +52,18 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
   // ISO string without TZ. So one MSK range covers both sources.
   const nowMsk = dayjs().add(MSK_OFFSET_HOURS, 'hour');
   const mskToday = nowMsk.startOf('day');
-  const todayStartSql = mskToday.format('YYYY-MM-DD HH:mm:ss');
-  const tomorrowStartSql = mskToday.add(1, 'day').format('YYYY-MM-DD HH:mm:ss');
+  const defaultStartSql = mskToday.format('YYYY-MM-DD HH:mm:ss');
+  const defaultEndSql = mskToday.add(1, 'day').format('YYYY-MM-DD HH:mm:ss');
+
+  const startSql = range?.start ?? defaultStartSql;
+  const endSql = range?.end ?? defaultEndSql;
   // Phone DB stores date_parsed in ISO format with 'T' separator
-  const todayStartIso = mskToday.format('YYYY-MM-DDTHH:mm:ss');
-  const tomorrowStartIso = mskToday.add(1, 'day').format('YYYY-MM-DDTHH:mm:ss');
+  const startIso = startSql.replace(' ', 'T');
+  const endIso = endSql.replace(' ', 'T');
+  const headerLabel = range?.label ?? `${nowMsk.format('DD.MM HH:mm')} МСК`;
 
   // 1. Orders from the phone (authoritative source)
-  const phoneTotals = getPhoneTotalsByArticle(todayStartIso, tomorrowStartIso);
+  const phoneTotals = getPhoneTotalsByArticle(startIso, endIso);
   if (phoneTotals.length === 0) return null;
 
   // 2. Ad spend + WB API orders per product
@@ -75,23 +96,23 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
       const snapshotHours = await monitoringRepo.getHourlySpendFromSnapshots(
         cabinetId,
         campaignIds,
-        todayStartSql,
-        tomorrowStartSql
+        startSql,
+        endSql
       );
       const snapshotSpend = snapshotHours.reduce((s, h) => s + h.spend, 0);
       const expenseSpend = await monitoringRepo.getSpendForCampaigns(
         cabinetId,
         campaignIds,
-        todayStartSql,
-        tomorrowStartSql
+        startSql,
+        endSql
       );
       spend = Math.max(snapshotSpend, expenseSpend);
 
       apiOrders = await monitoringRepo.getOrderCountForProduct(
         cabinetId,
         nmId,
-        todayStartSql,
-        tomorrowStartSql
+        startSql,
+        endSql
       );
     }
 
@@ -113,8 +134,7 @@ export async function generateCabinetReport(cabinetId: number): Promise<string |
   // Sort by phone orders DESC
   rows.sort((a, b) => b.phoneOrders - a.phoneOrders);
 
-  const timestamp = nowMsk.format('DD.MM HH:mm');
-  const header = `📊 <b>${cabinet.name}</b> | ${timestamp} МСК\n`;
+  const header = `📊 <b>${cabinet.name}</b> | ${headerLabel}\n`;
   const tableHeader = '\n<b>Артикул | Заказы тел/API | Бюджет | CPO</b>';
   const body = rows
     .map(r => {
