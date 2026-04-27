@@ -217,6 +217,67 @@ def get_all_keys():
         conn.close()
 
 
+# Statuses an order has reached its end-of-life in: customer cancelled (Отказ),
+# customer picked up at ПВЗ (Выкуп), or returned within 14d (Возврат).
+# update_order_status refuses to overwrite these with the parser's "Заказ"
+# fallback so a missing UI label can't clobber a previously-correct status.
+TERMINAL_STATUSES = ("Отказ", "Выкуп", "Возврат")
+
+
+def get_key_status_map():
+    """Return {key: status} for every order in the DB.
+
+    Used by the monitor to detect status transitions: the steady-state
+    boundary check compares each parsed card's current status against the
+    stored value and dispatches update_order_status only on change.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT key, status FROM orders").fetchall()
+        return {r["key"]: r["status"] for r in rows}
+    finally:
+        conn.close()
+
+
+def update_order_status(key, new_status):
+    """Update status column for an existing key. Return True iff a row changed.
+
+    Guards against UI-glitch downgrades: refuses to overwrite a terminal
+    status (Отказ/Выкуп/Возврат) with the parser's "Заказ" fallback, since
+    a genuine reversal is rare and the fallback fires whenever the status
+    badge fails to render. An *explicitly observed* status label IS allowed
+    to transition away from a terminal state (Выкуп→Возврат is legitimate).
+
+    Logs every suppressed downgrade so parser drift is observable in
+    journalctl rather than silently absorbed.
+    """
+    conn = get_connection()
+    try:
+        if new_status == "Заказ":
+            cur = conn.execute(
+                "UPDATE orders SET status = ? WHERE key = ? AND status NOT IN (?, ?, ?)",
+                (new_status, key, *TERMINAL_STATUSES),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                # Distinguish "key absent" (caller bug) from "guard fired" (UI drift)
+                # so the silent-but-logged guard is observable while a real bug surfaces.
+                row = conn.execute(
+                    "SELECT status FROM orders WHERE key = ?", (key,)
+                ).fetchone()
+                if row is not None and row["status"] in TERMINAL_STATUSES:
+                    print(f"[status] suppressed downgrade {row['status']}→Заказ for key={key}")
+            return cur.rowcount > 0
+        cur = conn.execute(
+            "UPDATE orders SET status = ? WHERE key = ?",
+            (new_status, key),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def get_recent_orders(limit=5):
     conn = get_connection()
     try:
