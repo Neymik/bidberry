@@ -15,20 +15,20 @@ MONTHS_RU = {
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    key                 TEXT    NOT NULL UNIQUE,
-    article             TEXT    NOT NULL,
+    key                 TEXT    NOT NULL UNIQUE CHECK(length(key) > 0),
+    article             TEXT    NOT NULL CHECK(length(article) > 0),
     product             TEXT    NOT NULL,
     size                TEXT    NOT NULL,
-    quantity            TEXT    NOT NULL,
+    quantity            TEXT    NOT NULL CHECK(length(quantity) > 0),
     status              TEXT    NOT NULL,
     date_raw            TEXT    NOT NULL,
-    date_parsed         TEXT    NOT NULL,
+    date_parsed         TEXT    NOT NULL CHECK(length(date_parsed) > 0),
     price               TEXT    NOT NULL,
-    price_cents         INTEGER NOT NULL,
+    price_cents         INTEGER NOT NULL CHECK(price_cents > 0),
     vendor_code         TEXT,
     category            TEXT,
-    warehouse           TEXT,
-    arrival_city        TEXT,
+    warehouse           TEXT    NOT NULL CHECK(length(warehouse) > 0),
+    arrival_city        TEXT    NOT NULL CHECK(length(arrival_city) > 0),
     first_seen          TEXT    NOT NULL,
     previous_order_key  TEXT,
     next_order_key      TEXT
@@ -38,7 +38,24 @@ CREATE INDEX IF NOT EXISTS idx_orders_article     ON orders(article);
 CREATE INDEX IF NOT EXISTS idx_orders_status      ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_first_seen  ON orders(first_seen);
 CREATE INDEX IF NOT EXISTS idx_orders_date_parsed ON orders(date_parsed);
+
+CREATE TABLE IF NOT EXISTS pending_telegram (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT    NOT NULL,
+    text        TEXT    NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_telegram_created ON pending_telegram(created_at);
 """
+
+# Cap the pending-telegram queue so a prolonged Telegram outage can't blow up
+# the sqlite file. When exceeded, oldest rows are dropped with a log line.
+PENDING_TG_MAX_ROWS = 200
+# Drop a pending row after this many unsuccessful delivery attempts so a
+# permanently-undeliverable message (e.g. malformed HTML) stops blocking the queue.
+PENDING_TG_MAX_ATTEMPTS = 20
 
 
 def get_connection():
@@ -138,44 +155,54 @@ def build_key(order):
 
 
 def upsert_order(order_dict):
-    """Insert order if key doesn't exist. Returns True if inserted (new), False if duplicate."""
+    """Insert order if key doesn't exist. Returns True if inserted (new), False if duplicate.
+
+    Uses plain INSERT (default conflict = ABORT) and catches IntegrityError so a
+    UNIQUE collision returns False (expected) while CHECK/NOT NULL violations
+    re-raise (loud — a partial card slipped the parser gate and must be investigated).
+    INSERT OR IGNORE would swallow CHECK violations silently and defeat the schema.
+    """
     date_parsed = parse_russian_date(order_dict.get("date"))
     price_cents = parse_price_cents(order_dict.get("price"))
     first_seen = order_dict.get("first_seen") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_connection()
     try:
-        cursor = conn.execute(
-            """INSERT OR IGNORE INTO orders
-               (key, article, product, size, quantity, status, date_raw, date_parsed,
-                price, price_cents, vendor_code, category, warehouse, arrival_city, first_seen,
-                previous_order_key, next_order_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                order_dict["key"],
-                order_dict["article"],
-                order_dict.get("product", ""),
-                order_dict.get("size", ""),
-                order_dict.get("quantity", ""),
-                order_dict["status"],
-                order_dict.get("date", ""),
-                date_parsed.isoformat() if date_parsed else "",
-                order_dict.get("price", ""),
-                price_cents or 0,
-                order_dict.get("vendor_code"),
-                order_dict.get("category"),
-                order_dict.get("warehouse"),
-                order_dict.get("arrival_city"),
-                first_seen,
-                order_dict.get("previous_order_key"),
-                order_dict.get("next_order_key"),
-            ),
-        )
-        conn.commit()
-        inserted = cursor.rowcount > 0
-        if not inserted:
-            print(f"  DUP SKIP: {order_dict['key']}")
-        return inserted
+        try:
+            conn.execute(
+                """INSERT INTO orders
+                   (key, article, product, size, quantity, status, date_raw, date_parsed,
+                    price, price_cents, vendor_code, category, warehouse, arrival_city, first_seen,
+                    previous_order_key, next_order_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order_dict["key"],
+                    order_dict["article"],
+                    order_dict.get("product", ""),
+                    order_dict.get("size", ""),
+                    order_dict.get("quantity", ""),
+                    order_dict["status"],
+                    order_dict.get("date", ""),
+                    date_parsed.isoformat() if date_parsed else "",
+                    order_dict.get("price", ""),
+                    price_cents or 0,
+                    order_dict.get("vendor_code"),
+                    order_dict.get("category"),
+                    order_dict.get("warehouse"),
+                    order_dict.get("arrival_city"),
+                    first_seen,
+                    order_dict.get("previous_order_key"),
+                    order_dict.get("next_order_key"),
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError as e:
+            msg = str(e).upper()
+            if "UNIQUE" in msg or "PRIMARY KEY" in msg:
+                print(f"  DUP SKIP: {order_dict['key']}")
+                return False
+            raise
     finally:
         conn.close()
 
@@ -296,5 +323,83 @@ def get_totals_by_article(start_dt, end_dt):
             (start_dt, end_dt),
         ).fetchall()
         return [(r["article"], r["vendor_code"] or "", r["cnt"], r["rev"]) for r in rows]
+    finally:
+        conn.close()
+
+
+# -------- Pending Telegram queue --------
+# Used by wb_order_monitor.send_telegram when a send gives up (network outage,
+# 429 budget exhausted). Messages are replayed at the top of each monitor cycle.
+
+def enqueue_pending_telegram(text, last_error=None):
+    """Append a message to the pending queue. Prunes oldest rows if over cap."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO pending_telegram (created_at, text, last_error) VALUES (?, ?, ?)",
+            (now, text, last_error),
+        )
+        conn.commit()
+        # Prune oldest if we exceed the cap
+        count = conn.execute("SELECT count(*) FROM pending_telegram").fetchone()[0]
+        if count > PENDING_TG_MAX_ROWS:
+            excess = count - PENDING_TG_MAX_ROWS
+            conn.execute(
+                "DELETE FROM pending_telegram WHERE id IN "
+                "(SELECT id FROM pending_telegram ORDER BY id ASC LIMIT ?)",
+                (excess,),
+            )
+            conn.commit()
+            print(f"  pending_telegram: pruned {excess} oldest rows (cap {PENDING_TG_MAX_ROWS})")
+    finally:
+        conn.close()
+
+
+def list_pending_telegram(limit=20):
+    """Oldest-first slice of the pending queue."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, created_at, text, attempts, last_error "
+            "FROM pending_telegram ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def delete_pending_telegram(row_id):
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM pending_telegram WHERE id = ?", (row_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def bump_pending_telegram_attempts(row_id, last_error=None):
+    """Increment attempts counter; delete row if it exceeds PENDING_TG_MAX_ATTEMPTS."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT attempts FROM pending_telegram WHERE id = ?", (row_id,)
+        ).fetchone()
+        if row is None:
+            return False  # already gone
+        attempts = row["attempts"] + 1
+        if attempts >= PENDING_TG_MAX_ATTEMPTS:
+            conn.execute("DELETE FROM pending_telegram WHERE id = ?", (row_id,))
+            conn.commit()
+            print(f"  pending_telegram: dropped row {row_id} after {attempts} attempts "
+                  f"(last_error={last_error!r})")
+            return False
+        conn.execute(
+            "UPDATE pending_telegram SET attempts = ?, last_error = ? WHERE id = ?",
+            (attempts, last_error, row_id),
+        )
+        conn.commit()
+        return True
     finally:
         conn.close()

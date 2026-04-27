@@ -50,6 +50,7 @@ exports/
 WBPartners-Auto/venv/
 WBPartners-Auto/__pycache__/
 WBPartners-Auto/orders.db
+WBPartners-Auto/orders.db.pre-*
 WBPartners-Auto/server.log
 WBPartners-Auto/monitor.log
 WBPartners-Auto/*.apk
