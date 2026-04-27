@@ -9,7 +9,9 @@ import time
 import os
 import subprocess
 import requests
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Callable
 from xml.etree import ElementTree
 from dotenv import load_dotenv
 
@@ -17,6 +19,7 @@ from db import (
     init_db, upsert_order, get_all_keys, build_key,
     enqueue_pending_telegram, list_pending_telegram,
     delete_pending_telegram, bump_pending_telegram_attempts,
+    get_key_status_map, update_order_status, TERMINAL_STATUSES,
 )
 from bot import run_bot_thread
 from api import run_api_thread
@@ -37,6 +40,29 @@ REFRESH_INTERVAL = 180  # seconds between refreshes (3 min)
 SCROLL_PAUSE = 2
 MAX_SCROLLS = 300  # hard safety cap — real exit is boundary (known key) or crossing today's midnight
 NO_PROGRESS_LIMIT = 3  # scrolls without any new card → break + warn
+
+# Rescan cadence + lookback for status-transition detection. The boundary-break
+# in collect_new_orders means inline detection only catches transitions for
+# cards above the first known key — older orders need a periodic deep rescan.
+# The rescan runs in-process (same orchestrator), so ADB stays single-owner
+# and recount_today.py's service-active gate continues to enforce that.
+SHALLOW_RESCAN_INTERVAL_SEC = int(os.getenv("RESCAN_SHALLOW_INTERVAL_SEC", "3600"))
+DEEP_RESCAN_INTERVAL_SEC    = int(os.getenv("RESCAN_DEEP_INTERVAL_SEC",    "86400"))
+SHALLOW_RESCAN_LOOKBACK_HOURS = 24
+DEEP_RESCAN_LOOKBACK_HOURS    = 72
+RESCAN_MAX_SCROLLS = 200
+
+# Status badge emoji map; mirrors the canonical maps in bot.py:35,130 so the
+# new-order, inline-transition, and rescan-digest alerts use the same glyphs.
+STATUS_EMOJI = {"Заказ": "✅", "Отказ": "❌", "Выкуп": "💰", "Возврат": "↩️"}
+
+# TODO(future): widen DEEP_RESCAN_LOOKBACK_HOURS to 21+ days once we confirm
+#   the feed scrolls reliably that far. Catches the full Возврат window.
+# TODO(future): persist a status_transitions history table — currently only
+#   the latest status survives, so transitions are observable only via
+#   Telegram alerts and journalctl log lines.
+# TODO(future): if Заказ→Выкуп turns out to be too noisy, downgrade it to a
+#   per-day digest while keeping Заказ→Отказ as a real-time alert.
 
 # Telegram send retry policy — burst notifications trigger 429 (rate limit);
 # without retry they dropped silently and blocked /count replies for 20-30s.
@@ -639,21 +665,29 @@ def _today_msk_midnight():
     return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def collect_new_orders(d, known_keys):
+def collect_new_orders(d, known_orders):
     """Scroll down collecting new orders until one of:
       (a) a known-key boundary is hit in the feed (steady-state — usually 1–2 scrolls),
       (b) the oldest visible parsed date drops below today's 00:00 MSK (covered full day),
       (c) NO_PROGRESS_LIMIT consecutive scrolls produced zero new cards (feed misbehaving),
       (d) MAX_SCROLLS hard safety cap (should never fire in practice).
 
-    Returns list of new orders in chronological order (oldest first).
+    Returns (new_orders, status_updates):
+      - new_orders: list of new orders in chronological order (oldest first).
+      - status_updates: dict of {key: (old_status, new_status, card)} for known
+        orders whose top-of-feed parse showed a different status. The caller
+        is responsible for applying these via update_order_status. Inline
+        detection only catches transitions for cards above the first known
+        key (the boundary-break stops scrolling) — older transitions are
+        picked up by the periodic rescan jobs.
     """
     from db import parse_russian_date  # local import to avoid top-level coupling
 
     global _last_collect_reason
     _last_collect_reason = "ok"
 
-    new_orders = {}  # key -> order, discovery order (newest first)
+    new_orders = {}        # key -> order, discovery order (newest first)
+    status_updates = {}    # key -> (old, new, card) for known-key transitions
     cutoff = _today_msk_midnight()
     no_progress = 0
     retry_mins = REFRESH_INTERVAL // 60
@@ -669,8 +703,13 @@ def collect_new_orders(d, known_keys):
 
         for o in orders:
             key = o["key"]
-            if key in known_keys:
+            if key in known_orders:
                 hit_boundary = True
+                old = known_orders[key]
+                new = o["status"]
+                # First observation wins — top-of-feed render is freshest.
+                if new != old and key not in status_updates:
+                    status_updates[key] = (old, new, o)
             elif key not in new_orders:
                 new_orders[key] = o
                 added_this_scroll += 1
@@ -770,11 +809,16 @@ def collect_new_orders(d, known_keys):
             new_in_sweep = 0
             hit_known = False
             for o in dump:
-                if o["key"] in known_keys:
+                key = o["key"]
+                if key in known_orders:
                     hit_known = True
+                    old = known_orders[key]
+                    new = o["status"]
+                    if new != old and key not in status_updates:
+                        status_updates[key] = (old, new, o)
                     continue
-                if o["key"] not in new_orders:
-                    new_orders[o["key"]] = o
+                if key not in new_orders:
+                    new_orders[key] = o
                     new_in_sweep += 1
             if new_in_sweep:
                 print(f"  straggler sweep {sweep + 1}: recovered {new_in_sweep} new card(s)")
@@ -782,7 +826,346 @@ def collect_new_orders(d, known_keys):
                 break  # confirmed past the boundary
 
     # Reverse: orders were collected newest-first (top of feed), return oldest-first
-    return list(reversed(new_orders.values()))
+    return list(reversed(new_orders.values())), status_updates
+
+
+def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
+    """Scroll back to cutoff_dt and update DB statuses for any key whose
+    parsed status differs from the stored value.
+
+    Status-update-only — does NOT insert new rows. New orders below the
+    monitor boundary are picked up when the next monitor cycle's
+    pull_to_refresh re-tops the feed, or by manual recount_today.py.
+
+    Mutates known_orders in place so the next monitor cycle sees the
+    updated statuses.
+
+    Honors RESCAN_INITIAL_SILENT=1 — the first deploy reconciles every
+    already-transitioned order at once, which would blast dozens of
+    Telegram messages and trip 429 rate limits. Set the env var on the
+    first restart, drop it on subsequent restarts.
+    """
+    from db import parse_russian_date  # local import to mirror collect_new_orders
+
+    global _last_parse_reason
+    print(f"  [{label} rescan] starting (cutoff={cutoff_dt.isoformat()})")
+    pull_to_refresh(d)
+    time.sleep(2)
+
+    w, h = d.window_size()
+    for _ in range(3):
+        adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
+        time.sleep(0.5)
+    time.sleep(1)
+
+    seen_keys = set()
+    transitions = []   # list of (key, old, new, card)
+    scrolls_used = 0
+    reached_cutoff = False
+
+    for scroll_i in range(RESCAN_MAX_SCROLLS + 1):
+        scrolls_used = scroll_i
+        cards, _dropped = parse_orders_from_hierarchy(d)
+        if _last_parse_reason == "error_screen":
+            print(f"  [{label} rescan] error screen at scroll {scroll_i} — aborting")
+            break
+        oldest_on_screen = None
+        for c in cards:
+            key = c["key"]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            parsed = parse_russian_date(c.get("date", ""))
+            if parsed and (oldest_on_screen is None or parsed < oldest_on_screen):
+                oldest_on_screen = parsed
+            if key in known_orders:
+                old = known_orders[key]
+                new = c["status"]
+                if new != old and update_order_status(key, new):
+                    known_orders[key] = new
+                    transitions.append((key, old, new, c))
+
+        if oldest_on_screen is not None and oldest_on_screen < cutoff_dt:
+            reached_cutoff = True
+            break
+
+        if scroll_i < RESCAN_MAX_SCROLLS:
+            adb_swipe(w // 2, int(h * 0.70), w // 2, int(h * 0.40), 300)
+            time.sleep(SCROLL_PAUSE)
+
+    print(f"  [{label} rescan] scanned {len(seen_keys)} unique keys, "
+          f"updated {len(transitions)}, scrolls={scrolls_used}, "
+          f"reached_cutoff={reached_cutoff}")
+
+    if not transitions:
+        return
+
+    if os.getenv("RESCAN_INITIAL_SILENT") == "1":
+        print(f"  [{label} rescan] alerts suppressed (RESCAN_INITIAL_SILENT=1)")
+        return
+
+    # Digest: chunk transitions through _chunk_messages so a long window of
+    # cancellations can't blast individual messages and trip Telegram 429.
+    parts = []
+    for _key, old, new, card in transitions:
+        product = (card.get("product") or "")[:80]
+        parts.append(
+            f"{STATUS_EMOJI.get(new, '?')} <b>{old} → {new}</b>\n"
+            f"{product}\n"
+            f"Артикул: <code>{card.get('article', '?')}</code> | "
+            f"{card.get('price', '?')} | {card.get('arrival_city', '?')}"
+        )
+    header = f"🔄 <b>Смена статусов ({label}, {len(transitions)})</b>\n\n———\n\n"
+    chunks = _chunk_messages(parts)
+    MAX_CHUNKS = 3
+    if len(chunks) > MAX_CHUNKS:
+        dropped = len(chunks) - MAX_CHUNKS
+        chunks = chunks[:MAX_CHUNKS]
+        chunks[-1] += f"\n\n… и ещё ~{dropped} блок(ов) переходов"
+    chunks[0] = header + chunks[0]
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        if total > 1:
+            chunk = f"<i>(part {i}/{total})</i>\n" + chunk
+        send_telegram(chunk)
+
+
+def run_shallow_rescan_cycle(d, state):
+    cutoff = datetime.now() - timedelta(hours=SHALLOW_RESCAN_LOOKBACK_HOURS)
+    rescan_for_status_changes(d, state["known_orders"], cutoff, "shallow")
+
+
+def run_deep_rescan_cycle(d, state):
+    cutoff = datetime.now() - timedelta(hours=DEEP_RESCAN_LOOKBACK_HOURS)
+    rescan_for_status_changes(d, state["known_orders"], cutoff, "deep")
+
+
+@dataclass
+class Job:
+    """One periodic device-bound task in the orchestrator."""
+    name: str
+    interval_sec: int
+    fn: Callable
+    next_run_ts: float = 0.0  # 0 = run immediately on first tick
+
+
+def _pick_due_job(jobs, now):
+    """Return the first due job (declaration-order tiebreak), or None.
+
+    Pure helper extracted for unit tests — see test_orchestrator_due_logic.py.
+    """
+    for j in jobs:
+        if j.next_run_ts <= now:
+            return j
+    return None
+
+
+def orchestrator_loop(d, state):
+    """Single-thread, single-device job runner.
+
+    Three jobs share one ADB session: monitor (180s), rescan_shallow (1h, 24h
+    lookback), rescan_deep (24h, 72h lookback). By construction the jobs never
+    overlap on the device — while a rescan runs (~30s–3min), monitor is simply
+    not started. As soon as the rescan returns, the orchestrator picks the
+    next due job, which is normally monitor.
+
+    Snapshots and restores _last_collect_reason around rescans so the
+    monitor's cold-restart escalation (no_container counter) doesn't trip on
+    a stale signal from rescan's parse_orders calls.
+    """
+    global _last_collect_reason
+    while True:
+        now = time.time()
+        job = _pick_due_job(JOBS, now)
+        if job is not None:
+            print(f"[orchestrator] running: {job.name}")
+            saved_collect_reason = _last_collect_reason
+            try:
+                job.fn(d, state)
+            except Exception as e:
+                import traceback
+                print(f"[orchestrator] {job.name} failed: {e}")
+                traceback.print_exc()
+            finally:
+                if job.name.startswith("rescan_"):
+                    # Rescans end at the bottom of the feed; renavigate so the
+                    # next monitor cycle's pull_to_refresh hits feed-top.
+                    try:
+                        navigate_to_orders(d)
+                    except Exception as e:
+                        print(f"[orchestrator] post-{job.name} renavigate failed: {e}")
+                    # Restore monitor's escalation signal.
+                    _last_collect_reason = saved_collect_reason
+                # Reset cadence AFTER the job — a long deep rescan can't queue
+                # up missed shallow rescans, and the next-pick is always
+                # relative to actual completion time.
+                job.next_run_ts = time.time() + job.interval_sec
+            continue
+        # No job due. Sleep until the next one is, capped at 30s for signal
+        # responsiveness. min over (>=0) so we never pass a negative number
+        # to time.sleep.
+        nap = max(0.5, min(j.next_run_ts - now for j in JOBS))
+        time.sleep(min(nap, 30))
+
+
+# Declaration order is the tiebreak when multiple jobs are due simultaneously.
+# Monitor first so steady-state new-order detection always wins ties.
+JOBS = [
+    Job("monitor",        REFRESH_INTERVAL,            fn=None),
+    Job("rescan_shallow", SHALLOW_RESCAN_INTERVAL_SEC, fn=None),
+    Job("rescan_deep",    DEEP_RESCAN_INTERVAL_SEC,    fn=None),
+]
+
+
+def run_monitor_cycle(d, state):
+    """One iteration of the regular monitor loop — refresh feed, parse top,
+    apply inline status transitions, save new orders.
+
+    Refactored from main()'s former while-True body. The trailing
+    time.sleep(REFRESH_INTERVAL) is removed; cadence is the orchestrator's job.
+    """
+    global _consecutive_no_container, _last_collect_reason
+    state["cycle"] = state.get("cycle", 0) + 1
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n--- Cycle {state['cycle']} at {now_str} ---")
+
+    # Replay any Telegram messages that couldn't be delivered in earlier cycles.
+    flush_pending_telegram()
+
+    new_orders = []
+    status_updates = {}
+    parse_ok = False
+    w, h = d.window_size()
+    # Up to 2 refresh→parse attempts: if an error appears mid-cycle, recover and re-parse
+    # immediately instead of losing REFRESH_INTERVAL seconds waiting for next cycle.
+    for _attempt in range(2):
+        # Recover from any error screen before refreshing
+        if handle_error_state(d):
+            # handle_error_state already re-navigated at tier 2+; at tier 1 just re-check feed
+            if _consecutive_errors <= 2:
+                navigate_to_orders(d)
+
+        # Dismiss any leftover notification shade before refreshing — a
+        # heads-up notification colliding with a swipe can leave it stuck open.
+        collapse_status_bar()
+
+        print("  Refreshing feed...")
+        pull_to_refresh(d)
+
+        # Error may have appeared as a result of the refresh itself
+        if handle_error_state(d):
+            continue  # retry the full refresh sequence
+
+        # Scroll to top
+        for _ in range(3):
+            adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
+            time.sleep(0.5)
+        time.sleep(1)
+
+        print("  Scanning for new orders...")
+        new_orders, status_updates = collect_new_orders(d, state["known_orders"])
+
+        # If parse returned empty AND the screen is actually an error, recover and retry
+        if not new_orders and not status_updates and _is_error_screen(d):
+            handle_error_state(d)
+            continue
+
+        parse_ok = True
+        break
+
+    # Re-navigate if nothing was parsed at all on first run (wrong screen, not an error)
+    if (parse_ok and not new_orders and not status_updates
+            and not state["known_orders"]):
+        print("  No orders visible — re-navigating to Лента заказов...")
+        navigate_to_orders(d)
+        time.sleep(2)
+        new_orders, status_updates = collect_new_orders(d, state["known_orders"])
+
+    if parse_ok:
+        reset_error_counter()
+
+        # Persistent "no scrollable container" usually means the WB Partners
+        # UI is hung on a loading screen or a system overlay. Wi-Fi toggle
+        # (try_network_recovery) won't fix that, so escalate to a cold start
+        # of the app after 2 cycles in a row.
+        if _last_collect_reason == "no_container":
+            _consecutive_no_container += 1
+            if _consecutive_no_container >= 2:
+                print(f"  Persistent no_container ({_consecutive_no_container}× cycles) — cold-starting WB Partners")
+                send_telegram(
+                    f"🔄 WB Monitor: лента не отображается {_consecutive_no_container} цикла подряд, "
+                    "перезапускаю WB Partners."
+                )
+                _adb_force_stop("wb.partners")
+                time.sleep(2)
+                try:
+                    d.app_start("wb.partners")
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"  cold start failed: {e}")
+                navigate_to_orders(d)
+                _consecutive_no_container = 0
+        else:
+            _consecutive_no_container = 0
+
+    # Apply inline status transitions: top-of-feed only, fire one alert each.
+    # Rare in steady state (≤2 per cycle), so individual messages are fine —
+    # bulk transitions go through the rescan digest path instead.
+    for key, (old, new, card) in status_updates.items():
+        if update_order_status(key, new):
+            state["known_orders"][key] = new
+            if new in TERMINAL_STATUSES:
+                product = (card.get("product") or "")[:80]
+                send_telegram(
+                    f"{STATUS_EMOJI[new]} <b>Смена статуса:</b> {old} → {new}\n"
+                    f"{product}\n"
+                    f"Артикул: <code>{card.get('article', '?')}</code> | "
+                    f"{card.get('price', '?')} | {card.get('arrival_city', '?')}"
+                )
+
+    # Save new orders to DB (oldest first)
+    saved_orders = []
+    for order in new_orders:
+        order["first_seen"] = now_str
+        if upsert_order(order):
+            saved_orders.append(order)
+            state["known_orders"][order["key"]] = order["status"]
+    new_orders = saved_orders
+
+    if new_orders:
+        print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
+        parts = []
+        for o in new_orders:
+            print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
+            parts.append(format_order_message(o))
+        header = f"🆕 <b>{len(new_orders)} new order(s)</b>\n\n———\n\n"
+        chunks = _chunk_messages(parts)
+        MAX_CHUNKS = 3
+        if len(chunks) > MAX_CHUNKS:
+            dropped = len(chunks) - MAX_CHUNKS
+            chunks = chunks[:MAX_CHUNKS]
+            chunks[-1] += f"\n\n… и ещё ~{dropped} блок(ов) заказов, см. /orders"
+        chunks[0] = header + chunks[0]
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, 1):
+            if total > 1:
+                chunk = f"<i>(part {i}/{total})</i>\n" + chunk
+            send_telegram(chunk)
+        # Trigger bidberry cabinet report for realtime summary update
+        trigger_bidberry_report()
+    else:
+        print("  No new orders")
+
+    # Scroll back to top
+    for _ in range(3):
+        adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
+        time.sleep(0.5)
+
+
+# Wire job functions into JOBS now that they're all defined.
+JOBS[0].fn = run_monitor_cycle
+JOBS[1].fn = run_shallow_rescan_cycle
+JOBS[2].fn = run_deep_rescan_cycle
 
 
 def main():
@@ -809,141 +1192,18 @@ def main():
 
     d = connect_device()
     navigate_to_orders(d)
-    known_keys = get_all_keys()
-    print(f"Loaded {len(known_keys)} orders from database")
+    known_orders = get_key_status_map()
+    print(f"Loaded {len(known_orders)} orders from database")
 
     send_telegram(
         "\U0001f680 <b>WB Monitor запущен</b>\n"
         f"Интервал: {REFRESH_INTERVAL // 60} мин\n"
-        f"Заказов в базе: {len(known_keys)}\n\n"
+        f"Заказов в базе: {len(known_orders)}\n\n"
         "Команды: /help"
     )
 
-    cycle = 0
-    while True:
-        cycle += 1
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n--- Cycle {cycle} at {now} ---")
-
-        # Replay any Telegram messages that couldn't be delivered in earlier cycles.
-        flush_pending_telegram()
-
-        new_orders = []
-        parse_ok = False
-        # Up to 2 refresh→parse attempts: if an error appears mid-cycle, recover and re-parse
-        # immediately instead of losing REFRESH_INTERVAL seconds waiting for next cycle.
-        for attempt in range(2):
-            # Recover from any error screen before refreshing
-            if handle_error_state(d):
-                # handle_error_state already re-navigated at tier 2+; at tier 1 just re-check feed
-                if _consecutive_errors <= 2:
-                    navigate_to_orders(d)
-
-            # Dismiss any leftover notification shade before refreshing — a
-            # heads-up notification colliding with a swipe can leave it stuck open.
-            collapse_status_bar()
-
-            print("  Refreshing feed...")
-            pull_to_refresh(d)
-
-            # Error may have appeared as a result of the refresh itself
-            if handle_error_state(d):
-                continue  # retry the full refresh sequence
-
-            # Scroll to top
-            w, h = d.window_size()
-            for _ in range(3):
-                adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
-                time.sleep(0.5)
-            time.sleep(1)
-
-            print("  Scanning for new orders...")
-            new_orders = collect_new_orders(d, known_keys)
-
-            # If parse returned empty AND the screen is actually an error, recover and retry
-            if not new_orders and _is_error_screen(d):
-                handle_error_state(d)
-                continue
-
-            parse_ok = True
-            break
-
-        # Re-navigate if nothing was parsed at all on first run (wrong screen, not an error)
-        if parse_ok and not new_orders and not known_keys:
-            print("  No orders visible — re-navigating to Лента заказов...")
-            navigate_to_orders(d)
-            time.sleep(2)
-            new_orders = collect_new_orders(d, known_keys)
-
-        if parse_ok:
-            reset_error_counter()
-
-            # Persistent "no scrollable container" usually means the WB Partners
-            # UI is hung on a loading screen or a system overlay. Wi-Fi toggle
-            # (try_network_recovery) won't fix that, so escalate to a cold start
-            # of the app after 2 cycles in a row — same fix that recovered the
-            # 2026-04-25 incident manually.
-            global _consecutive_no_container
-            if _last_collect_reason == "no_container":
-                _consecutive_no_container += 1
-                if _consecutive_no_container >= 2:
-                    print(f"  Persistent no_container ({_consecutive_no_container}× cycles) — cold-starting WB Partners")
-                    send_telegram(
-                        f"🔄 WB Monitor: лента не отображается {_consecutive_no_container} цикла подряд, "
-                        "перезапускаю WB Partners."
-                    )
-                    _adb_force_stop("wb.partners")
-                    time.sleep(2)
-                    try:
-                        d.app_start("wb.partners")
-                        time.sleep(5)
-                    except Exception as e:
-                        print(f"  cold start failed: {e}")
-                    navigate_to_orders(d)
-                    _consecutive_no_container = 0
-            else:
-                _consecutive_no_container = 0
-
-        # Save new orders to DB (oldest first)
-        saved_orders = []
-        for order in new_orders:
-            order["first_seen"] = now
-            if upsert_order(order):
-                saved_orders.append(order)
-                known_keys.add(order["key"])
-        new_orders = saved_orders
-
-        if new_orders:
-            print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
-            parts = []
-            for o in new_orders:
-                print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
-                parts.append(format_order_message(o))
-            header = f"🆕 <b>{len(new_orders)} new order(s)</b>\n\n———\n\n"
-            chunks = _chunk_messages(parts)
-            MAX_CHUNKS = 3
-            if len(chunks) > MAX_CHUNKS:
-                dropped = len(chunks) - MAX_CHUNKS
-                chunks = chunks[:MAX_CHUNKS]
-                chunks[-1] += f"\n\n… и ещё ~{dropped} блок(ов) заказов, см. /orders"
-            chunks[0] = header + chunks[0]
-            total = len(chunks)
-            for i, chunk in enumerate(chunks, 1):
-                if total > 1:
-                    chunk = f"<i>(part {i}/{total})</i>\n" + chunk
-                send_telegram(chunk)
-            # Trigger bidberry cabinet report for realtime summary update
-            trigger_bidberry_report()
-        else:
-            print("  No new orders")
-
-        # Scroll back to top
-        for _ in range(3):
-            adb_swipe(w // 2, int(h * 0.3), w // 2, int(h * 0.8), 200)
-            time.sleep(0.5)
-
-        print(f"  Sleeping {REFRESH_INTERVAL}s until next refresh...")
-        time.sleep(REFRESH_INTERVAL)
+    state = {"known_orders": known_orders, "cycle": 0}
+    orchestrator_loop(d, state)
 
 
 if __name__ == "__main__":
