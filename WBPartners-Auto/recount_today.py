@@ -72,7 +72,7 @@ def run(target_day, max_scrolls):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for scroll_i in range(max_scrolls + 1):
-        visible = parse_orders_from_hierarchy(d)
+        visible, _dropped = parse_orders_from_hierarchy(d)
         oldest_on_screen = None
 
         for o in visible:
