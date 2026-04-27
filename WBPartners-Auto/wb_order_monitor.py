@@ -47,6 +47,26 @@ TG_BACKOFF_BASE = 2
 # Required fields — skip partially rendered cards
 REQUIRED_FIELDS = ("article", "status", "date", "price", "arrival_city", "warehouse")
 
+# Status labels rendered inside each order card. Mirrors the canonical tuple
+# in bot.py:103. Defined here so parser code can be unit-tested without a
+# device (see test_status_detection.py).
+VALID_STATUSES = ("Заказ", "Отказ", "Выкуп", "Возврат")
+
+
+def detect_status(texts):
+    """Return the order status label found in a card's text nodes.
+
+    Prefers the LAST matching status word in the card's traversal order: the
+    status badge renders late in the card hierarchy (after product/article/
+    price/date labels), so right-to-left scanning avoids false hits on a
+    product name that happens to contain a status word as a standalone token.
+    Falls back to "Заказ" when no label is found (cropped/partial card),
+    which preserves existing behavior for those edge cases.
+
+    Pure helper — does not touch the device.
+    """
+    return next((t for t in reversed(texts) if t in VALID_STATUSES), "Заказ")
+
 # Recovery state (module-level so handle_error_state can escalate across cycles)
 _consecutive_errors = 0
 _last_stuck_alert_ts = 0.0  # for rate-limiting the "could not recover" Telegram alert
@@ -553,7 +573,7 @@ def parse_orders_from_hierarchy(d):
         if product.isdigit() or product in ("Дата оформления", "Стоимость", "Прибытие", "Склад WB"):
             product = ""
         order["product"] = product
-        order["status"] = "Заказ"  # Default — tab filter determines actual status
+        order["status"] = detect_status(texts)
 
         for i, text in enumerate(texts):
             if text.isdigit() and len(text) > 5:
