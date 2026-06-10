@@ -23,6 +23,8 @@ from db import (
 )
 from bot import run_bot_thread
 from api import run_api_thread
+from ui import detect_app_version, version_tuple
+from ui import feed_v2
 
 load_dotenv()
 
@@ -437,9 +439,34 @@ def reset_error_counter():
     _consecutive_errors = 0
 
 
+def _is_app_v2():
+    """True when the installed WB Partners needs the 2.34+ navigation (ui.feed_v2).
+
+    Detected per call (cheap dumpsys) so an app auto-update mid-run flips the
+    path without a monitor restart. Unknown version -> v1, the historical default.
+    """
+    version = detect_app_version(os.getenv("ANDROID_DEVICE", "") or None)
+    return bool(version) and version_tuple(version) >= (2, 33)
+
+
 def navigate_to_orders(d):
-    """Navigate to Лента заказов page via dashboard carousel."""
+    """Navigate to Лента заказов page (version-dispatched)."""
     serial = os.getenv("ANDROID_DEVICE", "")
+
+    if _is_app_v2():
+        # 2.34+: pure-ADB navigation from ui.feed_v2, parked on the 'Все' tab
+        # (same coverage as the v1 feed) so inline transition detection and the
+        # rescan jobs keep seeing real statuses. Under 2.34's status-date sort
+        # both new orders AND fresh transitions surface at the top; the scroll
+        # boundaries below are status_date-aware to stay correct there.
+        print("  Navigating to Лента заказов (feed_v2)...")
+        if feed_v2.open_feed(serial or None) != 0:
+            print("  Warning: feed_v2 navigation failed")
+            return False
+        feed_v2.select_tab(serial or None, "Все")
+        time.sleep(1.5)
+        return True
+
     print("  Navigating to Лента заказов...")
 
     # Handle error screens first (e.g. "Что-то пошло не так")
@@ -617,14 +644,21 @@ def parse_orders_from_hierarchy(d):
                 order["price"] = text
             elif text == "Дата оформления" and i + 1 < len(texts):
                 order["date"] = texts[i + 1]
+            elif text == "Дата текущего статуса" and i + 1 < len(texts):
+                # 2.34+ only. Diagnostic / boundary field — never part of the key.
+                order["status_date"] = texts[i + 1]
             elif text == "Прибытие" and i + 1 < len(texts):
                 order["arrival_city"] = texts[i + 1]
             elif text == "Склад WB" and i + 1 < len(texts):
                 order["warehouse"] = texts[i + 1]
 
         # Also detect date by Russian month pattern if not found via label
+        # (skipping the status-date value so it can never masquerade as the
+        # order date on a card whose "Дата оформления" row was cropped).
         if not order.get("date"):
             for text in texts:
+                if text == order.get("status_date"):
+                    continue
                 if ":" in text and any(m in text for m in
                     ["янв", "фев", "мар", "апр", "май", "июн",
                      "июл", "авг", "сен", "окт", "ноя", "дек"]):
@@ -714,12 +748,18 @@ def collect_new_orders(d, known_orders):
                 new_orders[key] = o
                 added_this_scroll += 1
 
-            parsed = parse_russian_date(o.get("date", ""))
+            # Feed position follows the status date on 2.34 (status-date sort);
+            # cards without one (2.31) are positioned by their order date.
+            parsed = parse_russian_date(o.get("status_date") or o.get("date", ""))
             if parsed and (oldest_on_screen is None or parsed < oldest_on_screen):
                 oldest_on_screen = parsed
 
-        if hit_boundary:
-            print(f"  Boundary (known key) at scroll {scroll_i} ({len(new_orders)} new)")
+        # Under status-date sort a fresh transition (known key) can sit ABOVE a
+        # brand-new order, so a known key alone must not stop the scan — break
+        # only once a dump is all-known. On 2.31 (new orders always on top) this
+        # degenerates to the old behavior at the same cost.
+        if hit_boundary and added_this_scroll == 0:
+            print(f"  Boundary (known keys, nothing new) at scroll {scroll_i} ({len(new_orders)} new)")
             break
 
         if oldest_on_screen is not None and oldest_on_screen < cutoff:
@@ -875,7 +915,10 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            parsed = parse_russian_date(c.get("date", ""))
+            # Status date when present (2.34 status-date sort): the rescan walks
+            # the feed in status-date order, so cutting off by status date covers
+            # exactly every transition inside the lookback window.
+            parsed = parse_russian_date(c.get("status_date") or c.get("date", ""))
             if parsed and (oldest_on_screen is None or parsed < oldest_on_screen):
                 oldest_on_screen = parsed
             if key in known_orders:

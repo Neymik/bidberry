@@ -82,8 +82,14 @@ def run(target_day, max_scrolls):
             seen_keys.add(key)
 
             date_dt = parse_date_for_cutoff(o.get("date", ""), target_day.year)
-            if date_dt and (oldest_on_screen is None or date_dt < oldest_on_screen):
-                oldest_on_screen = date_dt
+            # Feed position follows the status date on 2.34 (status-date sort,
+            # status_date >= order date); cards without one (2.31) sort by order
+            # date. Cutting off by position-date keeps the scan correct on both:
+            # every card of the target day sits above the position-date cutoff.
+            pos_dt = (parse_date_for_cutoff(o.get("status_date", ""), target_day.year)
+                      or date_dt)
+            if pos_dt and (oldest_on_screen is None or pos_dt < oldest_on_screen):
+                oldest_on_screen = pos_dt
 
             if date_dt and cutoff <= date_dt < cutoff_end:
                 o["first_seen"] = now_str
