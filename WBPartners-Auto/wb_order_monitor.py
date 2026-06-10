@@ -24,7 +24,6 @@ from db import (
 from bot import run_bot_thread
 from api import run_api_thread
 from ui import detect_app_version, version_tuple
-from ui import feed_v2
 
 load_dotenv()
 
@@ -449,23 +448,115 @@ def _is_app_v2():
     return bool(version) and version_tuple(version) >= (2, 33)
 
 
+def _navigate_v2(d):
+    """2.34+ navigation, entirely through the existing uiautomator2 session.
+
+    MUST NOT shell out to classic `adb shell uiautomator dump` (ui.feed_v2's
+    transport): starting classic uiautomator kills the u2 accessibility service,
+    and the subsequent u2 self-heal kicks WB Partners back to the home screen
+    mid-cycle (observed on first v2 deploy, 2026-06-10).
+
+    Relaunches the app, dismisses popups, opens the feed via the dashboard
+    'Лента заказов' row ('Ещё' on the same row), parks on the 'Все' tab so
+    inline transition detection and the rescan jobs keep seeing real statuses.
+    """
+    print("  Navigating to Лента заказов (2.34 layout)...")
+    try:
+        d.app_stop("wb.partners")
+        time.sleep(2)
+        d.app_start("wb.partners")
+        time.sleep(8)
+    except Exception as e:
+        print(f"  app relaunch failed: {e}")
+
+    def on_feed_v2():
+        return (d(resourceId="top_app_bar_header_text", text="Лента заказов").exists(timeout=1)
+                and d(resourceId="date_picker_range_text").exists(timeout=1))
+
+    # Dismiss stacked popups (promo sheet, update dialog, transient error screen)
+    for _ in range(6):
+        if on_feed_v2():
+            break
+        if d(text="Не сейчас").exists(timeout=1):
+            print("  dismissing update dialog")
+            d(text="Не сейчас").click(); time.sleep(1.5); continue
+        x = d(descriptionContains="Xmark")
+        if not x.exists(timeout=1):
+            x = d(descriptionContains="CloseSheet")
+        if x.exists(timeout=1):
+            print("  closing promo sheet")
+            x.click(); time.sleep(1.5); continue
+        if d(text="Обновить").exists(timeout=1):
+            print("  error screen — tapping Обновить")
+            d(text="Обновить").click(); time.sleep(3); continue
+        break
+
+    if not on_feed_v2():
+        # Scroll the dashboard down to the 'Лента заказов' section, tap its
+        # row-mate 'Ещё' (NOT the Новости one — must sit on the same row).
+        w, h = d.window_size()
+        for _ in range(10):
+            lenta = d(text="Лента заказов")
+            if lenta.exists(timeout=1):
+                lb = lenta.info["bounds"]
+                lcy = (lb["top"] + lb["bottom"]) // 2
+                if lcy > int(h * 0.70):
+                    # Row sits at the bottom edge, under the floating WB
+                    # assistant button (~[906,2056] on 1080x2400) — a tap there
+                    # opens the Помощник chat instead. Bring the row mid-screen.
+                    adb_swipe(w // 2, int(h * 0.65),
+                              w // 2, int(h * 0.65) - (lcy - int(h * 0.50)), 300)
+                    time.sleep(1.2)
+                    continue
+                target = None
+                more = d(text="Ещё")
+                for i in range(more.count):
+                    mb = d(text="Ещё", instance=i).info["bounds"]
+                    mcy = (mb["top"] + mb["bottom"]) // 2
+                    if abs(mcy - lcy) < 90:
+                        target = ((mb["left"] + mb["right"]) // 2, mcy)
+                        break
+                if target:
+                    print(f"  tapping 'Ещё' next to Лента заказов at {target}")
+                    d.click(*target)
+                else:
+                    print("  no adjacent 'Ещё' — tapping the section title")
+                    lenta.click()
+                time.sleep(3)
+                break
+            adb_swipe(w // 2, int(h * 0.70), w // 2, int(h * 0.27), 300)
+            time.sleep(1.2)
+
+    # Verify (retrying through transient error screens), then select 'Все'.
+    for _ in range(5):
+        if on_feed_v2():
+            tab = d(resourceId="tab_name", text="Все")
+            if tab.exists(timeout=2):
+                tab.click()
+                time.sleep(1.5)
+            print("  Opened Лента заказов (2.34)")
+            return True
+        if d(text="Чат с Помощником").exists(timeout=1):
+            # Floating assistant button swallowed a tap — back out of the chat.
+            print("  landed in Помощник chat — pressing back")
+            d.press("back")
+            time.sleep(1.5)
+            continue
+        if d(text="Обновить").exists(timeout=1):
+            d(text="Обновить").click()
+            time.sleep(3)
+            continue
+        time.sleep(1.5)
+    print("  Warning: 2.34 navigation failed")
+    return False
+
+
 def navigate_to_orders(d):
     """Navigate to Лента заказов page (version-dispatched)."""
     serial = os.getenv("ANDROID_DEVICE", "")
 
     if _is_app_v2():
-        # 2.34+: pure-ADB navigation from ui.feed_v2, parked on the 'Все' tab
-        # (same coverage as the v1 feed) so inline transition detection and the
-        # rescan jobs keep seeing real statuses. Under 2.34's status-date sort
-        # both new orders AND fresh transitions surface at the top; the scroll
-        # boundaries below are status_date-aware to stay correct there.
-        print("  Navigating to Лента заказов (feed_v2)...")
-        if feed_v2.open_feed(serial or None) != 0:
-            print("  Warning: feed_v2 navigation failed")
-            return False
-        feed_v2.select_tab(serial or None, "Все")
-        time.sleep(1.5)
-        return True
+        return _navigate_v2(d)
 
     print("  Navigating to Лента заказов...")
 
@@ -724,6 +815,7 @@ def collect_new_orders(d, known_orders):
     status_updates = {}    # key -> (old, new, card) for known-key transitions
     cutoff = _today_msk_midnight()
     no_progress = 0
+    dropped_only_streak = 0
     retry_mins = REFRESH_INTERVAL // 60
     # Track parse reasons across scrolls; the dominant one when we bail tells us why.
     reason_counts = {"error_screen": 0, "no_container": 0, "empty_feed": 0, "ok": 0}
@@ -785,8 +877,14 @@ def collect_new_orders(d, known_orders):
             # overlap swipe will reveal it fully on the next dump. Counting it
             # as "no progress" would trigger a false "feed not scrolling" alert
             # when the only remaining card on screen is a persistent partial.
+            # But the bypass must be bounded: on a WRONG screen (e.g. kicked to
+            # the dashboard, whose widgets parse as eternal partials) every dump
+            # drops incomplete "cards" and an unbounded pass would scroll
+            # blindly to MAX_SCROLLS each cycle.
             if dropped_incomplete > 0:
-                pass  # keep no_progress unchanged; scroll and retry
+                dropped_only_streak += 1
+                if dropped_only_streak > 8:
+                    no_progress += 1
             else:
                 no_progress += 1
             if no_progress >= NO_PROGRESS_LIMIT:
@@ -815,6 +913,7 @@ def collect_new_orders(d, known_orders):
                 break
         else:
             no_progress = 0
+            dropped_only_streak = 0
 
         if scroll_i < MAX_SCROLLS:
             w, h = d.window_size()
