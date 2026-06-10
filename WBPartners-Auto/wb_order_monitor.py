@@ -49,6 +49,7 @@ NO_PROGRESS_LIMIT = 3  # scrolls without any new card → break + warn
 # and recount_today.py's service-active gate continues to enforce that.
 SHALLOW_RESCAN_INTERVAL_SEC = int(os.getenv("RESCAN_SHALLOW_INTERVAL_SEC", "3600"))
 DEEP_RESCAN_INTERVAL_SEC    = int(os.getenv("RESCAN_DEEP_INTERVAL_SEC",    "86400"))
+SHEETS_EXPORT_INTERVAL_SEC  = int(os.getenv("SHEETS_EXPORT_INTERVAL_SEC", "900"))
 SHALLOW_RESCAN_LOOKBACK_HOURS = 24
 DEEP_RESCAN_LOOKBACK_HOURS    = 72
 RESCAN_MAX_SCROLLS = 200
@@ -1072,6 +1073,47 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
         send_telegram(chunk)
 
 
+_sheets_export_fail_streak = 0
+_last_sheets_alert_ts = 0.0
+
+
+def run_sheets_export_cycle(d, state):
+    """Push fresh order data to the bidberry Google Sheet (does not touch the device).
+
+    Two tabs, one auth: 'Заказы' (daily x product summary) and 'Сравнение CPO'
+    (bot vs manual 'Расчет CPO'). Lazy imports so a gspread problem can never
+    break monitor startup; each tab is isolated so one failing doesn't block
+    the other. Persistent failures alert Telegram at most every 6h.
+    """
+    global _sheets_export_fail_streak, _last_sheets_alert_ts
+    import export_to_sheets
+    import export_cpo_comparison
+
+    gc = export_to_sheets.authorize()
+    errors = []
+    for name, fn in (("Заказы", export_to_sheets.export),
+                     ("Сравнение CPO", export_cpo_comparison.export)):
+        try:
+            fn(gc=gc)
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            print(f"  sheets export '{name}' failed: {e}")
+
+    if errors:
+        _sheets_export_fail_streak += 1
+        now_ts = time.time()
+        if _sheets_export_fail_streak >= 4 and now_ts - _last_sheets_alert_ts > 21600:
+            send_telegram(
+                "⚠️ Экспорт в Google Sheets не работает "
+                f"({_sheets_export_fail_streak} попыток подряд): {'; '.join(errors)[:300]}"
+            )
+            _last_sheets_alert_ts = now_ts
+    else:
+        if _sheets_export_fail_streak:
+            print(f"  sheets export recovered (was {_sheets_export_fail_streak} failures)")
+        _sheets_export_fail_streak = 0
+
+
 def run_shallow_rescan_cycle(d, state):
     cutoff = datetime.now() - timedelta(hours=SHALLOW_RESCAN_LOOKBACK_HOURS)
     rescan_for_status_changes(d, state["known_orders"], cutoff, "shallow")
@@ -1156,6 +1198,7 @@ JOBS = [
     Job("monitor",        REFRESH_INTERVAL,            fn=None),
     Job("rescan_shallow", SHALLOW_RESCAN_INTERVAL_SEC, fn=None),
     Job("rescan_deep",    DEEP_RESCAN_INTERVAL_SEC,    fn=None),
+    Job("sheets_export",  SHEETS_EXPORT_INTERVAL_SEC,  fn=None),
 ]
 
 
@@ -1308,6 +1351,7 @@ def run_monitor_cycle(d, state):
 JOBS[0].fn = run_monitor_cycle
 JOBS[1].fn = run_shallow_rescan_cycle
 JOBS[2].fn = run_deep_rescan_cycle
+JOBS[3].fn = run_sheets_export_cycle
 
 
 def main():
