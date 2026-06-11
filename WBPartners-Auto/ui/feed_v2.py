@@ -449,12 +449,32 @@ def run(serial, since_str, max_scrolls, scroll_pause, skip_top=False, stop_on_kn
     seen = {}        # every key seen this run (incl. out-of-range) — drives termination
     collected = {}   # in-range orders actually stored
     no_progress = 0
+    retry_taps = 0
     new = dup = skipped_old = bad = 0
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     end_reached = False
 
     for scroll_i in range(max_scrolls + 1):
-        orders = parse_orders(dump_xml(adb))
+        xml = dump_xml(adb)
+
+        # Lazy pagination can fail mid-feed: a "Не удалось загрузить" footer with
+        # a "Повторить" button appears and the list stops growing. Without this
+        # tap the no-progress counter misreads the stall as end-of-list (cost us
+        # the June 7-8 recovery on the first attempt, 2026-06-11).
+        if "Не удалось загрузить" in xml:
+            retry_btn = _find(_nodes(xml), text="Повторить")
+            if retry_btn and retry_taps < 20:
+                retry_taps += 1
+                print(f"  pagination failed — tapping Повторить ({retry_taps})")
+                _tap(adb, retry_btn)
+                time.sleep(3)
+                no_progress = 0
+                continue
+            if retry_taps >= 20:
+                print("  pagination keeps failing after 20 retries — stopping here")
+                break
+
+        orders = parse_orders(xml)
         added_keys = 0
         for o in orders:
             if o["key"] in seen:
@@ -489,6 +509,7 @@ def run(serial, since_str, max_scrolls, scroll_pause, skip_top=False, stop_on_kn
                 break
         else:
             no_progress = 0
+            retry_taps = 0  # consecutive cap: progress proves pagination recovered
 
         if scroll_i and scroll_i % 10 == 0:
             print(f"  ... scroll {scroll_i}, {len(collected)} in-range "

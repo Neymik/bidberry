@@ -847,6 +847,17 @@ def collect_new_orders(d, known_orders):
             if parsed and (oldest_on_screen is None or parsed < oldest_on_screen):
                 oldest_on_screen = parsed
 
+        # Lazy pagination can fail mid-feed ("Не удалось загрузить" + Повторить
+        # footer) and silently stall the scan — retry before any boundary logic
+        # can misread the stall.
+        if added_this_scroll == 0 and d(text="Не удалось загрузить").exists(timeout=0.5):
+            btn = d(text="Повторить")
+            if btn.exists(timeout=1):
+                print("  pagination failed — tapping Повторить")
+                btn.click()
+                time.sleep(3)
+                continue
+
         # Under status-date sort a fresh transition (known key) can sit ABOVE a
         # brand-new order, so a known key alone must not stop the scan — break
         # only once a dump is all-known. On 2.31 (new orders always on top) this
@@ -1031,6 +1042,14 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
         if oldest_on_screen is not None and oldest_on_screen < cutoff_dt:
             reached_cutoff = True
             break
+
+        # Retry failed lazy pagination so deep rescans don't silently truncate.
+        if d(text="Не удалось загрузить").exists(timeout=0.5):
+            btn = d(text="Повторить")
+            if btn.exists(timeout=1):
+                print(f"  [{label} rescan] pagination failed — tapping Повторить")
+                btn.click()
+                time.sleep(3)
 
         if scroll_i < RESCAN_MAX_SCROLLS:
             adb_swipe(w // 2, int(h * 0.70), w // 2, int(h * 0.40), 300)
