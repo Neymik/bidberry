@@ -30,6 +30,7 @@ DB = os.path.join(HERE, "orders.db")
 MANUAL_ID = "18A79mif7NdZU3h95FiGrjAO1zyd1iWUQDzibck2kRNQ"
 OUT_ID = "1T0YjtkHe0L6ylFdLgzPKZqMtWGo-PzXLy3TK_ionnCU"
 OUT_TAB = "Сравнение CPO"
+SINCE = "2026-06-01"  # only show days from this date (ISO), matching the Заказы tab
 
 # product -> (manual label, vendor_code). Columns in the manual 'Штаны' tab:
 #   grey:  время=1 заказы=2 затраты=3 CPO=4   |   black: время=7 заказы=8 затраты=9 CPO=10
@@ -116,11 +117,13 @@ def export(gc=None):
         # Full picture: union every (day, product) the bot recorded Заказы for with the
         # days present in the manual sheet. Days the manager hasn't filled in still appear
         # — manual & CPO columns blank, showing the bot's order count for the whole day.
-        keys = set(manual)
+        # Bounded below by SINCE so the tab stays focused on the current period.
+        keys = {k for k in manual if k[0] >= SINCE}
         for label, vc, _c in PRODUCTS:
             for (d,) in con.execute(
                     f"SELECT DISTINCT substr({msk}, 1, 10) FROM orders "
-                    "WHERE vendor_code=? AND status='Заказ'", (vc,)):
+                    "WHERE vendor_code=? AND status='Заказ' "
+                    f"AND substr({msk}, 1, 10) >= ?", (vc, SINCE)):
                 if d:
                     keys.add((d, label))
 
