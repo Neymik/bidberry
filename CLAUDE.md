@@ -63,7 +63,9 @@ is coordinated through a shared **dev task board**. These rules are mandatory:
 3. **Always commit AND push the relevant files after finishing a feature.** Never
    leave completed work uncommitted in the shared working dir — others pull from
    `main`. Commit only files relevant to the task, write a clear message, `git push`,
-   then mark the task: `... tasks.ts done <id> <your-name>` (add a `comment` if useful).
+   then mark the task **ИИ-готово**: `... tasks.ts done <id> <your-name>` (sets
+   `ai_done`; add a `comment` if useful). **AI must NEVER set `resolved` (Решено)** —
+   that status is human-only: a person verifies the work and sets Решено via the UI.
 
 4. **Work directly on `main` — no per-task branches for now.** Everyone commits to
    the one repo on `main`; keep changes small and push straight to `main` so others
@@ -76,7 +78,9 @@ is coordinated through a shared **dev task board**. These rules are mandatory:
 Repo `src/db/dev-tasks-repository.ts`, routes `src/web/dev-tasks-routes.ts`, CLI
 `src/cli/tasks.ts`. Reads are open; the REST API mutations require header
 `X-Trigger-Secret: $TRIGGER_SECRET` (the browser board prompts for it once via 🔑).
-Statuses: `backlog → todo → in_progress → review → done` (+ `blocked`).
+Statuses: `new` (Новое) → `in_progress` (В работе) → `ai_done` (ИИ-готово, set by AI)
+→ `resolved` (Решено, **human-only**) ; `obsolete` (Неактуально). AI marks `ai_done`
+on finishing; only a human sets `resolved` (the CLI rejects `status … resolved`).
 
 CLI quick reference:
 ```bash

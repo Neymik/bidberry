@@ -604,7 +604,7 @@ CREATE TABLE IF NOT EXISTS dev_tasks (
   id INT AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(500) NOT NULL,
   description TEXT,
-  status VARCHAR(20) NOT NULL DEFAULT 'backlog',
+  status VARCHAR(20) NOT NULL DEFAULT 'new',
   priority VARCHAR(10) NOT NULL DEFAULT 'medium',
   assignee VARCHAR(100),
   tags VARCHAR(255),

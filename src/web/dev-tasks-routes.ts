@@ -195,12 +195,11 @@ const BOARD_HTML = /* html */ `<!DOCTYPE html>
   .lrow .lmeta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .lrow .actions { display: flex; gap: 6px; }
   .lrow .actions select, .lrow .actions button { font-size: 12px; padding: 3px 8px; }
+  .st-new { background:#1e293b; color:#94a3b8; border:1px solid #334155; }
   .st-in_progress { background:#1e3a5f; color:#bfdbfe; }
-  .st-review { background:#3b2f5e; color:#ddd6fe; }
-  .st-blocked { background:#7f1d1d; color:#fecaca; }
-  .st-todo { background:#334155; color:#cbd5e1; }
-  .st-backlog { background:#1e293b; color:#94a3b8; border:1px solid #334155; }
-  .st-done { background:#14532d; color:#bbf7d0; }
+  .st-ai_done { background:#3b2f5e; color:#ddd6fe; }
+  .st-resolved { background:#14532d; color:#bbf7d0; }
+  .st-obsolete { background:#334155; color:#64748b; }
   @media (max-width: 720px) { .lrow { flex-wrap: wrap; } }
   dialog { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 12px; padding: 20px; width: min(520px, 92vw); }
   dialog::backdrop { background: rgba(0,0,0,.6); }
@@ -256,7 +255,7 @@ const BOARD_HTML = /* html */ `<!DOCTYPE html>
 <script>
 const STATUSES = ${JSON.stringify(DEV_TASK_STATUSES)};
 const PRIORITIES = ${JSON.stringify(DEV_TASK_PRIORITIES)};
-const LABELS = { backlog:'Бэклог', todo:'К выполнению', in_progress:'В работе', review:'Ревью', done:'Готово', blocked:'Заблокировано' };
+const LABELS = { new:'Новое', in_progress:'В работе', ai_done:'ИИ-готово', resolved:'Решено', obsolete:'Неактуально' };
 const PRI_LABELS = { low:'низкий', medium:'средний', high:'высокий', urgent:'срочно' };
 let SECRET = localStorage.getItem('devTaskSecret') || '';
 let WHO = localStorage.getItem('devTaskWho') || '';
@@ -297,6 +296,16 @@ async function api(method, path, body) {
 }
 
 function esc(s) { return (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function copyId(id, btn) {
+  const text = '#' + id;
+  const flash = () => { if (btn) { const o = btn.textContent; btn.textContent = '✓'; setTimeout(() => { btn.textContent = o; }, 1000); } };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(flash).catch(() => prompt('Скопируйте ИД:', text));
+  } else {
+    prompt('Скопируйте ИД:', text);
+  }
+}
 
 async function load() {
   const q = document.getElementById('search').value.trim();
@@ -350,6 +359,7 @@ function row(t) {
       '<select onchange="move(' + t.id + ', this.value)">' +
         STATUSES.map(s => '<option value="' + s + '"' + (s===t.status?' selected':'') + '>' + LABELS[s] + '</option>').join('') +
       '</select>' +
+      '<button onclick="copyId(' + t.id + ', this)" title="Скопировать ИД">⧉ ID</button>' +
       '<button onclick="claim(' + t.id + ')">Взять</button>' +
       '<button onclick="edit(' + t.id + ')">Изменить</button>' +
       '<button class="danger" onclick="del(' + t.id + ')">✕</button>' +
@@ -375,6 +385,7 @@ function card(t) {
       '<select onchange="move(' + t.id + ', this.value)">' +
         STATUSES.map(s => '<option value="' + s + '"' + (s===t.status?' selected':'') + '>' + LABELS[s] + '</option>').join('') +
       '</select>' +
+      '<button onclick="copyId(' + t.id + ', this)" title="Скопировать ИД">⧉ ID</button>' +
       '<button onclick="claim(' + t.id + ')">Взять</button>' +
       '<button onclick="edit(' + t.id + ')">Изменить</button>' +
       '<button class="danger" onclick="del(' + t.id + ')">✕</button>' +

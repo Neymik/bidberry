@@ -10,11 +10,13 @@
  *   add "<title>" [opts]          Create a task
  *       --desc "..."  --priority low|medium|high|urgent
  *       --assignee X  --tags "a,b" --branch feat/x --status backlog|todo|...
- *   status <id> <status> [who]    Change status (optionally set assignee)
+ *   status <id> <status> [who]    Change status (new|in_progress|ai_done|obsolete).
+ *                                 "resolved" (Решено) is HUMAN-ONLY — rejected here.
  *   claim <id> <who>              Assign to <who> and mark in_progress
  *   assign <id> <who>             Set assignee
  *   comment <id> "<text>" [who]   Add a comment to the activity log
- *   done <id> [who]               Mark done
+ *   done <id> [who]               Mark ai_done (ИИ-готово). NOT resolved — a human
+ *                                 verifies and sets Решено via the board UI.
  *   rm <id>                       Delete a task
  *
  * The board UI is at http://localhost:${APP_PORT:-3000}/admin/tasks
@@ -97,6 +99,10 @@ async function main() {
         const status = rest[1] as t.DevTaskStatus;
         const who = rest[2];
         if (!t.DEV_TASK_STATUSES.includes(status)) { console.error(`Invalid status. One of: ${t.DEV_TASK_STATUSES.join(', ')}`); process.exit(1); }
+        if (t.HUMAN_ONLY_STATUSES.includes(status)) {
+          console.error(`"${status}" (Решено) ставит только человек через UI — ИИ запрещено. ИИ отмечает завершённую задачу как ai_done (ИИ-готово): tasks.ts done <id>`);
+          process.exit(1);
+        }
         const task = await t.updateTask(id, { status, assignee: who, author: who });
         if (!task) { console.error(`Task #${id} not found`); process.exit(1); }
         console.log('Updated ' + fmt(task));
@@ -130,11 +136,13 @@ async function main() {
         break;
       }
       case 'done': {
+        // AI marks finished work as ai_done (ИИ-готово), NOT resolved (Решено) —
+        // a human verifies and sets Решено via the board UI.
         const id = parseInt(rest[0], 10);
         const who = rest[1];
-        const task = await t.updateTask(id, { status: 'done', author: who });
+        const task = await t.updateTask(id, { status: 'ai_done', author: who });
         if (!task) { console.error(`Task #${id} not found`); process.exit(1); }
-        console.log('Done ' + fmt(task));
+        console.log('ИИ-готово ' + fmt(task));
         break;
       }
       case 'rm': {

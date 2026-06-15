@@ -12,22 +12,30 @@
  */
 import { query, execute } from './connection';
 
+// Status set (slug → Russian label on the board):
+//   new        → Новое
+//   in_progress→ В работе
+//   ai_done    → ИИ-готово   (set automatically by AI when it finishes work)
+//   resolved   → Решено      (HUMAN-ONLY — AI must never set this automatically)
+//   obsolete   → Неактуально
 export type DevTaskStatus =
-  | 'backlog'
-  | 'todo'
+  | 'new'
   | 'in_progress'
-  | 'review'
-  | 'done'
-  | 'blocked';
+  | 'ai_done'
+  | 'resolved'
+  | 'obsolete';
 
+// Workflow order (drives kanban columns left→right).
 export const DEV_TASK_STATUSES: DevTaskStatus[] = [
-  'backlog',
-  'todo',
+  'new',
   'in_progress',
-  'review',
-  'done',
-  'blocked',
+  'ai_done',
+  'resolved',
+  'obsolete',
 ];
+
+// Status only a human may set. AI/automation is forbidden from setting it.
+export const HUMAN_ONLY_STATUSES: DevTaskStatus[] = ['resolved'];
 
 export type DevTaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 export const DEV_TASK_PRIORITIES: DevTaskPriority[] = ['low', 'medium', 'high', 'urgent'];
@@ -66,7 +74,7 @@ export async function ensureDevTasksSchema(): Promise<void> {
       id INT AUTO_INCREMENT PRIMARY KEY,
       title VARCHAR(500) NOT NULL,
       description TEXT,
-      status VARCHAR(20) NOT NULL DEFAULT 'backlog',
+      status VARCHAR(20) NOT NULL DEFAULT 'new',
       priority VARCHAR(10) NOT NULL DEFAULT 'medium',
       assignee VARCHAR(100),
       tags VARCHAR(255),
@@ -90,6 +98,12 @@ export async function ensureDevTasksSchema(): Promise<void> {
       FOREIGN KEY (task_id) REFERENCES dev_tasks(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+
+  // Idempotent migration of the legacy status set to the current one. No-ops
+  // after the first run (no rows match the old slugs anymore).
+  await execute("UPDATE dev_tasks SET status='new' WHERE status IN ('backlog','todo','blocked')");
+  await execute("UPDATE dev_tasks SET status='ai_done' WHERE status='review'");
+  await execute("UPDATE dev_tasks SET status='resolved' WHERE status='done'");
 }
 
 export interface ListFilter {
@@ -117,7 +131,7 @@ export async function listTasks(filter: ListFilter = {}): Promise<DevTask[]> {
   // Order: active work first, then by priority, then newest.
   sql += `
     ORDER BY
-      FIELD(status, 'in_progress','review','blocked','todo','backlog','done'),
+      FIELD(status, 'in_progress','ai_done','new','resolved','obsolete'),
       FIELD(priority, 'urgent','high','medium','low'),
       updated_at DESC`;
   return query<DevTask[]>(sql, params);
@@ -165,7 +179,7 @@ export async function createTask(input: CreateTaskInput): Promise<DevTask> {
     [
       input.title,
       input.description || null,
-      input.status || 'backlog',
+      input.status || 'new',
       input.priority || 'medium',
       input.assignee || null,
       input.tags || null,
