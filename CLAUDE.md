@@ -65,11 +65,12 @@ is coordinated through a shared **dev task board**. These rules are mandatory:
    `main`. Commit only files relevant to the task, write a clear message, `git push`,
    then mark the task: `... tasks.ts done <id> <your-name>` (add a `comment` if useful).
 
-4. **One task = one branch.** Record the branch on the task (`--branch feat/...` on
-   create, or the Edit dialog). Because every developer shares the single working
-   dir `/home/ostap/bidberry`, prefer a **git worktree per developer/agent** to avoid
-   stomping each other's uncommitted changes — see the board task for setup. At
-   minimum: never start a second feature while another's edits are uncommitted.
+4. **Work directly on `main` — no per-task branches for now.** Everyone commits to
+   the one repo on `main`; keep changes small and push straight to `main` so others
+   pull them quickly. **Use a git worktree only when a change is big** (many files /
+   many commits before it's coherent): `git worktree add ../bidberry-<name> <branch>`,
+   do the work there, then **merge it back into `main` when done** and remove the
+   worktree. Don't start a second large change while another's edits are uncommitted.
 
 **Board internals:** DB tables `dev_tasks` + `dev_task_events` (global, NOT cabinet-scoped).
 Repo `src/db/dev-tasks-repository.ts`, routes `src/web/dev-tasks-routes.ts`, CLI

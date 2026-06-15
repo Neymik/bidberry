@@ -149,11 +149,11 @@ app.delete('/api/dev-tasks/:id', requireSecret, async (c) => {
 app.get('/admin/tasks', (c) => c.html(BOARD_HTML));
 
 const BOARD_HTML = /* html */ `<!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dev Task Board</title>
+<title>Доска задач</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>">
 <style>
   :root { color-scheme: light dark; }
@@ -201,55 +201,56 @@ const BOARD_HTML = /* html */ `<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>🗂️ Dev Task Board</h1>
+  <h1>🗂️ Доска задач</h1>
   <span class="muted" id="stats"></span>
   <span class="grow"></span>
-  <input id="search" placeholder="Search…" style="width:180px">
-  <button onclick="setIdentity()" id="whoBtn" title="Set your name (used as author/assignee)">👤 …</button>
-  <button onclick="setSecret()" title="Set write secret">🔑</button>
-  <button class="primary" onclick="openNew()">+ New task</button>
-  <button onclick="load()" title="Refresh">↻</button>
+  <input id="search" placeholder="Поиск…" style="width:180px">
+  <button onclick="setIdentity()" id="whoBtn" title="Укажите своё имя (автор / исполнитель)">👤 …</button>
+  <button onclick="setSecret()" title="Секрет для записи">🔑</button>
+  <button class="primary" onclick="openNew()">+ Новая задача</button>
+  <button onclick="load()" title="Обновить">↻</button>
 </header>
 <main>
   <div class="cols" id="board"></div>
 </main>
 
 <dialog id="dlg">
-  <h3 id="dlgTitle" style="margin-top:0">New task</h3>
+  <h3 id="dlgTitle" style="margin-top:0">Новая задача</h3>
   <input type="hidden" id="f_id">
-  <label>Title *</label>
-  <input id="f_title" placeholder="What needs doing">
-  <label>Description</label>
-  <textarea id="f_desc" rows="4" placeholder="Context, acceptance criteria, links…"></textarea>
+  <label>Название *</label>
+  <input id="f_title" placeholder="Что нужно сделать">
+  <label>Описание</label>
+  <textarea id="f_desc" rows="4" placeholder="Контекст, критерии приёмки, ссылки…"></textarea>
   <div class="row">
-    <div><label>Status</label><select id="f_status"></select></div>
-    <div><label>Priority</label><select id="f_priority"></select></div>
+    <div><label>Статус</label><select id="f_status"></select></div>
+    <div><label>Приоритет</label><select id="f_priority"></select></div>
   </div>
   <div class="row">
-    <div><label>Assignee</label><input id="f_assignee" placeholder="dev name / claude"></div>
-    <div><label>Branch</label><input id="f_branch" placeholder="feat/…"></div>
+    <div><label>Исполнитель</label><input id="f_assignee" placeholder="имя / claude"></div>
+    <div><label>Ветка</label><input id="f_branch" placeholder="main (или worktree)"></div>
   </div>
-  <label>Tags (comma-separated)</label>
+  <label>Теги (через запятую)</label>
   <input id="f_tags" placeholder="orders, frontend">
   <div class="row" style="margin-top:16px">
-    <button onclick="document.getElementById('dlg').close()">Cancel</button>
-    <button class="primary" onclick="save()">Save</button>
+    <button onclick="document.getElementById('dlg').close()">Отмена</button>
+    <button class="primary" onclick="save()">Сохранить</button>
   </div>
 </dialog>
 
 <script>
 const STATUSES = ${JSON.stringify(DEV_TASK_STATUSES)};
 const PRIORITIES = ${JSON.stringify(DEV_TASK_PRIORITIES)};
-const LABELS = { backlog:'Backlog', todo:'To do', in_progress:'In progress', review:'Review', done:'Done', blocked:'Blocked' };
+const LABELS = { backlog:'Бэклог', todo:'К выполнению', in_progress:'В работе', review:'Ревью', done:'Готово', blocked:'Заблокировано' };
+const PRI_LABELS = { low:'низкий', medium:'средний', high:'высокий', urgent:'срочно' };
 let SECRET = localStorage.getItem('devTaskSecret') || '';
 let WHO = localStorage.getItem('devTaskWho') || '';
 
 function setSecret() {
-  const v = prompt('Write secret (TRIGGER_SECRET). Stored locally in this browser only.', SECRET);
+  const v = prompt('Секрет для записи (TRIGGER_SECRET). Хранится только локально в этом браузере.', SECRET);
   if (v !== null) { SECRET = v.trim(); localStorage.setItem('devTaskSecret', SECRET); }
 }
 function setIdentity() {
-  const v = prompt('Your name — recorded as author/assignee:', WHO);
+  const v = prompt('Ваше имя — записывается как автор/исполнитель:', WHO);
   if (v !== null) { WHO = v.trim(); localStorage.setItem('devTaskWho', WHO); renderWho(); }
 }
 function renderWho() { document.getElementById('whoBtn').textContent = '👤 ' + (WHO || '…'); }
@@ -260,7 +261,7 @@ async function api(method, path, body) {
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
-    if (res.status === 401) { alert('Unauthorized — click 🔑 to set the write secret.'); }
+    if (res.status === 401) { alert('Нет доступа — нажмите 🔑, чтобы указать секрет для записи.'); }
     throw new Error(e.error || res.statusText);
   }
   return res.json();
@@ -294,7 +295,7 @@ function card(t) {
     '<div class="title">#' + t.id + ' ' + esc(t.title) + '</div>' +
     (t.description ? '<div class="desc">' + esc(t.description) + '</div>' : '') +
     '<div class="meta">' +
-      '<span class="pill pri-' + t.priority + '">' + t.priority + '</span>' +
+      '<span class="pill pri-' + t.priority + '">' + (PRI_LABELS[t.priority] || t.priority) + '</span>' +
       (t.assignee ? '<span class="assignee">@' + esc(t.assignee) + '</span>' : '') +
       (t.branch ? '<span class="muted">⎇ ' + esc(t.branch) + '</span>' : '') +
       tags +
@@ -303,8 +304,8 @@ function card(t) {
       '<select onchange="move(' + t.id + ', this.value)">' +
         STATUSES.map(s => '<option value="' + s + '"' + (s===t.status?' selected':'') + '>' + LABELS[s] + '</option>').join('') +
       '</select>' +
-      '<button onclick="claim(' + t.id + ')">Claim</button>' +
-      '<button onclick="edit(' + t.id + ')">Edit</button>' +
+      '<button onclick="claim(' + t.id + ')">Взять</button>' +
+      '<button onclick="edit(' + t.id + ')">Изменить</button>' +
       '<button class="danger" onclick="del(' + t.id + ')">✕</button>' +
     '</div>';
   return el;
@@ -315,14 +316,14 @@ async function claim(id) {
   if (!WHO) { setIdentity(); if (!WHO) return; }
   try { await api('PATCH', '/api/dev-tasks/' + id, { assignee: WHO, status: 'in_progress', author: WHO }); load(); } catch(e){ alert(e.message); }
 }
-async function del(id) { if (!confirm('Delete task #' + id + '?')) return; try { await api('DELETE', '/api/dev-tasks/' + id); load(); } catch(e){ alert(e.message); } }
+async function del(id) { if (!confirm('Удалить задачу #' + id + '?')) return; try { await api('DELETE', '/api/dev-tasks/' + id); load(); } catch(e){ alert(e.message); } }
 
 function fillSelects() {
   document.getElementById('f_status').innerHTML = STATUSES.map(s => '<option value="'+s+'">'+LABELS[s]+'</option>').join('');
-  document.getElementById('f_priority').innerHTML = PRIORITIES.map(p => '<option value="'+p+'"'+(p==='medium'?' selected':'')+'>'+p+'</option>').join('');
+  document.getElementById('f_priority').innerHTML = PRIORITIES.map(p => '<option value="'+p+'"'+(p==='medium'?' selected':'')+'>'+(PRI_LABELS[p]||p)+'</option>').join('');
 }
 function openNew() {
-  document.getElementById('dlgTitle').textContent = 'New task';
+  document.getElementById('dlgTitle').textContent = 'Новая задача';
   ['f_id','f_title','f_desc','f_assignee','f_branch','f_tags'].forEach(i => document.getElementById(i).value = '');
   document.getElementById('f_status').value = 'backlog';
   document.getElementById('f_priority').value = 'medium';
@@ -330,7 +331,7 @@ function openNew() {
 }
 async function edit(id) {
   const { task } = await api('GET', '/api/dev-tasks/' + id);
-  document.getElementById('dlgTitle').textContent = 'Edit task #' + id;
+  document.getElementById('dlgTitle').textContent = 'Задача #' + id;
   document.getElementById('f_id').value = task.id;
   document.getElementById('f_title').value = task.title;
   document.getElementById('f_desc').value = task.description || '';
@@ -353,7 +354,7 @@ async function save() {
     tags: document.getElementById('f_tags').value.trim(),
     author: WHO,
   };
-  if (!payload.title) { alert('Title is required'); return; }
+  if (!payload.title) { alert('Название обязательно'); return; }
   try {
     if (id) await api('PATCH', '/api/dev-tasks/' + id, payload);
     else await api('POST', '/api/dev-tasks', payload);
