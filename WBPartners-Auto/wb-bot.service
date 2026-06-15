@@ -1,0 +1,29 @@
+[Unit]
+Description=WB Partners Telegram Bot (slash commands)
+After=network.target
+# Bot reads orders.db (written by wb-monitor) and calls the bidberry backend
+# at 127.0.0.1:3000 for /count. Neither is hard-required at boot, but if the
+# monitor unit exists, prefer starting after it so the DB schema is ready.
+After=wb-monitor.service
+
+[Service]
+Type=simple
+User=ostap
+WorkingDirectory=/home/ostap/bidberry/WBPartners-Auto
+Environment=PYTHONUNBUFFERED=1
+# Same proxy config as wb-monitor.service — Telegram outbound goes through
+# 3128, localhost (bidberry backend) is already excluded by squid's no_proxy.
+Environment=http_proxy=http://127.0.0.1:3128
+Environment=https_proxy=http://127.0.0.1:3128
+Environment=ALL_PROXY=socks5://127.0.0.1:1080
+ExecStart=/home/ostap/bidberry/WBPartners-Auto/venv/bin/python3 -u /home/ostap/bidberry/WBPartners-Auto/bot_runner.py
+Restart=always
+# Fixed 10s recovery — replaces the in-process exponential backoff that could
+# leave the bot silent for up to 5 minutes after a transient Telegram error.
+RestartSec=10
+StartLimitIntervalSec=0
+StandardOutput=append:/home/ostap/bidberry/WBPartners-Auto/bot.log
+StandardError=append:/home/ostap/bidberry/WBPartners-Auto/bot.log
+
+[Install]
+WantedBy=multi-user.target

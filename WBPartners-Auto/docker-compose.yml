@@ -25,7 +25,9 @@ services:
   scrcpy-web:
     image: scavin/ws-scrcpy
     container_name: scrcpy-web
-    network_mode: host
+    # Loopback-only publish: reachable only via SSH tunnel, never on 0.0.0.0
+    ports:
+      - "127.0.0.1:22090:22090"
     depends_on:
       redroid:
         condition: service_healthy
@@ -34,7 +36,8 @@ services:
     volumes:
       - ./ws-scrcpy-config.yaml:/ws-scrcpy/config.yaml:ro
     entrypoint: /bin/bash
-    command: -c "adb connect 127.0.0.1:5555 && sleep 3 && npm start"
+    # Reach redroid by compose service name (same internal network), not host loopback
+    command: -c "adb connect redroid:5555 && sleep 3 && npm start"
     restart: unless-stopped
 
 volumes:

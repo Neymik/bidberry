@@ -1386,9 +1386,12 @@ def main():
     print(f"Telegram chat: {TELEGRAM_CHAT_ID}")
     print("=" * 60)
 
-    # Start Telegram bot in background thread
-    run_bot_thread()
-    print("Telegram bot started (polling for commands)")
+    # Telegram bot polling now lives ONLY in wb-bot.service (bot_runner.py).
+    # Running it here too made both services fight over getUpdates -> telegram
+    # Conflict. Alerts still go out via send_telegram (sendMessage), which does
+    # not conflict with polling.
+    # run_bot_thread()
+    # print("Telegram bot started (polling for commands)")
 
     # Start REST API in background thread
     run_api_thread()

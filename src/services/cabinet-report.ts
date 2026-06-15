@@ -148,7 +148,7 @@ export async function generateCabinetReport(
   const footer =
     `\n──────────────\n` +
     `<b>Итого:</b> ${totalPhoneOrders}/${totalApiOrders} шт | ${formatRubles(totalSpend)} | CPO ${totalCpoStr}\n` +
-    `<i>* CPO = бюджет / заказы с телефона</i>`;
+    `<i>* CPO = бюджет / (заказы + выкупы) с телефона</i>`;
 
   return header + tableHeader + '\n' + body + footer;
 }

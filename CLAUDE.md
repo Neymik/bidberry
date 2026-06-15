@@ -190,10 +190,10 @@ Subdirectory `WBPartners-Auto/` — Python-based WB Partners mobile app automati
   jobs through one in-process orchestrator — regular cycle (~3min), shallow
   rescan (hourly, 24h lookback), deep rescan (daily, 72h lookback). Status
   changes flow into `orders.status` and per-cycle Telegram alerts. Bidberry's
-  `getPhoneTotalsByArticle` (in `src/services/wbpartners-phone-db.ts`) is
-  status-blind — it counts every row in the time window — so cabinet-report
-  numbers are unaffected by transitions. See `WBPartners-Auto/CLAUDE.md` for
-  the full design.
+  `getPhoneTotalsByArticle` (in `src/services/wbpartners-phone-db.ts`) counts
+  only currently-active orders (`status IN ('Заказ','Выкуп')`); cancellations
+  and returns are excluded so CPO and /count totals reflect orders that still
+  contribute revenue. See `WBPartners-Auto/CLAUDE.md` for the full design.
 - **First deploy of status tracking:** set `RESCAN_INITIAL_SILENT=1` in the env
   before the first `systemctl restart` to suppress Telegram alerts during the
   catch-up reconcile, then drop the env var on the next restart.

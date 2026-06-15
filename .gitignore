@@ -12,8 +12,8 @@ coverage
 
 # logs
 logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # dotenv environment variable files
 .env
@@ -45,12 +45,15 @@ exports/
 
 # Backup files
 *.bak
+*.bak-*
 
 # WBPartners-Auto
 WBPartners-Auto/venv/
 WBPartners-Auto/__pycache__/
 WBPartners-Auto/orders.db
 WBPartners-Auto/orders.db.pre-*
+WBPartners-Auto/orders.db.bak-*
+WBPartners-Auto/"orders.db"
 WBPartners-Auto/server.log
 WBPartners-Auto/monitor.log
 WBPartners-Auto/*.apk

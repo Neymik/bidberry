@@ -7,9 +7,25 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orders.db")
 
+# Both 3-letter abbreviation (used by WB Partners for most months) AND full
+# genitive form (used for "май" because the abbreviation collides with the
+# nominative; observed in production 2026-05-01 → 2026-05-03 incident where
+# every May order failed parse_russian_date and tripped the date_parsed
+# CHECK constraint, aborting the entire monitor cycle for 3 days). Including
+# all genitive forms for resilience in case WB shifts other months too.
 MONTHS_RU = {
-    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "июн": 6,
-    "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+    "янв": 1, "января":   1,
+    "фев": 2, "февраля":  2,
+    "мар": 3, "марта":    3,
+    "апр": 4, "апреля":   4,
+    "май": 5, "мая":      5,
+    "июн": 6, "июня":     6,
+    "июл": 7, "июля":     7,
+    "авг": 8, "августа":  8,
+    "сен": 9, "сентября": 9,
+    "окт": 10, "октября": 10,
+    "ноя": 11, "ноября":  11,
+    "дек": 12, "декабря": 12,
 }
 
 SCHEMA = """
@@ -31,13 +47,17 @@ CREATE TABLE IF NOT EXISTS orders (
     arrival_city        TEXT    NOT NULL CHECK(length(arrival_city) > 0),
     first_seen          TEXT    NOT NULL,
     previous_order_key  TEXT,
-    next_order_key      TEXT
+    next_order_key      TEXT,
+    is_stale            INTEGER NOT NULL DEFAULT 0,
+    stale_at            TEXT,
+    stale_reason        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_article     ON orders(article);
 CREATE INDEX IF NOT EXISTS idx_orders_status      ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_first_seen  ON orders(first_seen);
 CREATE INDEX IF NOT EXISTS idx_orders_date_parsed ON orders(date_parsed);
+CREATE INDEX IF NOT EXISTS idx_orders_live_date   ON orders(is_stale, date_parsed);
 
 CREATE TABLE IF NOT EXISTS pending_telegram (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +103,13 @@ def init_db():
     for col in ("previous_order_key", "next_order_key"):
         if col not in cols:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT")
+    # Migration: soft-delete columns (see migrate_soft_delete.py for standalone runner).
+    if "is_stale" not in cols:
+        conn.execute("ALTER TABLE orders ADD COLUMN is_stale INTEGER NOT NULL DEFAULT 0")
+    if "stale_at" not in cols:
+        conn.execute("ALTER TABLE orders ADD COLUMN stale_at TEXT")
+    if "stale_reason" not in cols:
+        conn.execute("ALTER TABLE orders ADD COLUMN stale_reason TEXT")
     conn.commit()
     conn.close()
 
@@ -208,10 +235,15 @@ def upsert_order(order_dict):
 
 
 def get_all_keys():
-    """Return set of all existing order keys."""
+    """Return set of currently-live order keys (excludes soft-deleted rows).
+
+    Soft-deleted rows are kept for audit but must not appear in `known_orders`,
+    or the monitor would treat a re-appeared order as already-known and skip
+    re-inserting it.
+    """
     conn = get_connection()
     try:
-        rows = conn.execute("SELECT key FROM orders").fetchall()
+        rows = conn.execute("SELECT key FROM orders WHERE is_stale = 0").fetchall()
         return {r["key"] for r in rows}
     finally:
         conn.close()
@@ -225,15 +257,20 @@ TERMINAL_STATUSES = ("Отказ", "Выкуп", "Возврат")
 
 
 def get_key_status_map():
-    """Return {key: status} for every order in the DB.
+    """Return {key: status} for every live order (excludes soft-deleted rows).
 
     Used by the monitor to detect status transitions: the steady-state
     boundary check compares each parsed card's current status against the
     stored value and dispatches update_order_status only on change.
+
+    Stale rows are excluded so a re-appeared order (after disappearing from
+    the feed and being soft-deleted) is treated as new and re-inserted.
     """
     conn = get_connection()
     try:
-        rows = conn.execute("SELECT key, status FROM orders").fetchall()
+        rows = conn.execute(
+            "SELECT key, status FROM orders WHERE is_stale = 0"
+        ).fetchall()
         return {r["key"]: r["status"] for r in rows}
     finally:
         conn.close()
@@ -274,6 +311,65 @@ def update_order_status(key, new_status):
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def soft_delete_order(key, reason):
+    """Mark a live row stale and rename its key so the original key is free
+    to be re-inserted as a fresh row when the order reappears on the phone.
+
+    The unique-key constraint forces the rename: without it, a re-appearance
+    after soft-delete would hit IntegrityError in upsert_order. The renamed
+    key (`STALE:<id>:<original>`) preserves forensic lookup — the original
+    is recoverable by stripping the prefix.
+
+    Returns True iff a row was updated. Idempotent on already-stale rows
+    (returns False — they were renamed on the first soft-delete).
+    """
+    if not reason:
+        raise ValueError("soft_delete_order requires a reason for audit.")
+    now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id FROM orders WHERE key = ? AND is_stale = 0", (key,)
+        ).fetchone()
+        if row is None:
+            return False
+        new_key = f"STALE:{row['id']}:{key}"
+        conn.execute(
+            "UPDATE orders SET is_stale = 1, stale_at = ?, stale_reason = ?, key = ? "
+            "WHERE id = ?",
+            (now_iso, reason, new_key, row["id"]),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_live_keys_in_range(start_iso, end_iso):
+    """Return [(key, article, date_parsed, warehouse, arrival_city, price_cents), ...]
+    for live rows whose date_parsed falls in [start_iso, end_iso).
+
+    Used by the reconcile pass to bucket DB rows the same way phone-visible
+    cards are bucketed (article, date_parsed, warehouse, arrival_city,
+    price_cents) and detect divergence per bucket.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT key, article, date_parsed, warehouse, arrival_city, price_cents "
+            "FROM orders "
+            "WHERE is_stale = 0 AND date_parsed >= ? AND date_parsed < ?",
+            (start_iso, end_iso),
+        ).fetchall()
+        return [
+            (r["key"], r["article"], r["date_parsed"], r["warehouse"],
+             r["arrival_city"], r["price_cents"])
+            for r in rows
+        ]
     finally:
         conn.close()
 

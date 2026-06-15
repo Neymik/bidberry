@@ -64,11 +64,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders [N] — последние N заказов (по умолчанию 5)\n"
         "/count — итоги за сегодня\n"
         "/count hour — итоги за последний час\n"
+        "/count_yesterday — итоги за вчера\n"
         "/count ГГГГ-ММ-ДД — итоги за дату\n"
         "/count ГГГГ-ММ-ДД ГГГГ-ММ-ДД — итоги за период\n"
         "/status Заказ|Отказ|Выкуп|Возврат — фильтр по статусу\n"
         "/stats — сводка по заказам\n"
         "/csv [начало] [конец] — выгрузка CSV\n"
+        "/csv_yesterday — выгрузка CSV за вчера\n"
         "/help — эта справка",
         parse_mode="HTML",
     )
@@ -248,6 +250,12 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         end = now.strftime("%Y-%m-%d %H:%M:%S")
         label = f"Последний час ({hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')})"
         user_label = label
+    elif args[0].lower() in ("yesterday", "вчера"):
+        y = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        start = f"{y} 00:00:00"
+        end = now.strftime("%Y-%m-%d") + " 00:00:00"
+        label = y
+        user_label = f"вчера ({y})"
     elif len(args) == 1:
         try:
             d = datetime.strptime(args[0], "%Y-%m-%d")
@@ -289,6 +297,19 @@ async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ bidberry недоступен: {payload}")
 
 
+@restricted
+async def count_yesterday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["yesterday"]
+    await count_cmd(update, context)
+
+
+@restricted
+async def csv_yesterday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    y = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    context.args = [y, y]
+    await csv_cmd(update, context)
+
+
 async def _on_error(update, context):
     """Surface handler errors in monitor.log instead of silently swallowing them.
 
@@ -311,30 +332,42 @@ def build_app():
     app.add_handler(CommandHandler("orders", orders_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("count", count_cmd))
+    app.add_handler(CommandHandler("count_yesterday", count_yesterday_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("csv", csv_cmd))
+    app.add_handler(CommandHandler("csv_yesterday", csv_yesterday_cmd))
     app.add_error_handler(_on_error)
     return app
 
 
-def run_bot_thread():
-    """Start the bot in a daemon thread using manual polling (no signal handlers).
+async def _poll_forever():
+    """Run the polling loop until cancelled/crashed. Used by both the legacy
+    in-process thread starter and the standalone bot service."""
+    import asyncio
+    app = build_app()
+    await app.initialize()
+    await app.updater.start_polling()
+    await app.start()
+    while True:
+        await asyncio.sleep(1)
 
-    Auto-restarts with backoff if initialize/polling dies — transient network
-    errors (httpx.ConnectError, Telegram SSL drops) shouldn't permanently kill
-    the bot while the order monitor keeps running.
-    """
+
+def run_bot_blocking():
+    """Foreground bot entry — runs polling in the current thread and lets
+    exceptions propagate so the supervising process manager (systemd) restarts
+    cleanly with a fixed RestartSec, instead of the in-process exponential
+    backoff that could leave /count silent for up to 5 minutes."""
+    import asyncio
+    asyncio.run(_poll_forever())
+
+
+def run_bot_thread():
+    """Legacy in-process daemon-thread starter, kept for compatibility with
+    server.py / older deployments that still embed the bot. Production now
+    runs the bot under wb-bot.service via run_bot_blocking()."""
     import threading
     import asyncio
     import traceback
-
-    async def _poll():
-        app = build_app()
-        await app.initialize()
-        await app.updater.start_polling()
-        await app.start()
-        while True:
-            await asyncio.sleep(1)
 
     def _run():
         loop = asyncio.new_event_loop()
@@ -342,7 +375,7 @@ def run_bot_thread():
         backoff = 10
         while True:
             try:
-                loop.run_until_complete(_poll())
+                loop.run_until_complete(_poll_forever())
             except Exception as e:
                 print(f"Telegram bot crashed: {e.__class__.__name__}: {e}")
                 traceback.print_exc()

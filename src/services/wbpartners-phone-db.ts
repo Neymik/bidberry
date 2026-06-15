@@ -44,6 +44,15 @@ export interface PhoneArticleTotals {
  * Get per-vendor-code order counts for a time window (MSK wall-clock).
  * Uses `date_parsed` (actual order time from the app UI).
  *
+ * Counts only currently-active orders (status in 'Заказ' or 'Выкуп') —
+ * cancellations ('Отказ') and returns ('Возврат') are excluded so CPO and
+ * the /count totals reflect orders that actually contribute revenue.
+ *
+ * Soft-deleted rows (`is_stale = 1`) are excluded — those are orders the
+ * reconcile rescan saw disappear from the phone feed (the WB Partners app
+ * dropped them between scans). The renamed-key audit trail stays in DB
+ * but doesn't inflate totals. See WBPartners-Auto/db.py:soft_delete_order.
+ *
  * @param fromIso  MSK wall-clock start, format "YYYY-MM-DDTHH:MM:SS"
  * @param toIso    MSK wall-clock end (exclusive), same format
  */
@@ -58,6 +67,8 @@ export function getPhoneTotalsByArticle(fromIso: string, toIso: string): PhoneAr
                 COUNT(*) as cnt
          FROM orders
          WHERE date_parsed >= ? AND date_parsed < ?
+           AND status IN ('Заказ', 'Выкуп')
+           AND is_stale = 0
          GROUP BY article, vendor_code
          ORDER BY cnt DESC`
       )
