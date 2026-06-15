@@ -173,6 +173,48 @@ export async function getHourlySpendFromSnapshots(
   return rows.map(r => ({ hour: r.hour, spend: Number(r.spend) }));
 }
 
+/**
+ * Cabinet-wide hourly spend from budget snapshots (all campaigns).
+ * Sums spend_since_prev per hour. Used for the hourly CPO series.
+ */
+export async function getCabinetHourlySpendFromSnapshots(
+  cabinetId: number,
+  dateFrom: string,
+  dateTo: string
+): Promise<{ hour: string; spend: number }[]> {
+  const rows = await query<any[]>(
+    `SELECT DATE_FORMAT(snapshot_at, '%Y-%m-%d %H:00:00') as hour,
+            COALESCE(SUM(spend_since_prev), 0) as spend
+     FROM campaign_budget_snapshots
+     WHERE cabinet_id = ? AND snapshot_at >= ? AND snapshot_at < ?
+       AND spend_since_prev IS NOT NULL
+     GROUP BY hour ORDER BY hour`,
+    [cabinetId, dateFrom, dateTo]
+  );
+  return rows.map(r => ({ hour: r.hour, spend: Number(r.spend) }));
+}
+
+/**
+ * Cabinet-wide hourly spend from the WB Advert expense feed (all adverts).
+ * Fallback / cross-check for the snapshot source — per hour we take the max
+ * of the two, mirroring generateCabinetReport's Math.max(snapshot, expense).
+ */
+export async function getCabinetHourlySpendFromExpenses(
+  cabinetId: number,
+  dateFrom: string,
+  dateTo: string
+): Promise<{ hour: string; spend: number }[]> {
+  const rows = await query<any[]>(
+    `SELECT DATE_FORMAT(upd_time, '%Y-%m-%d %H:00:00') as hour,
+            COALESCE(SUM(upd_sum), 0) as spend
+     FROM campaign_expenses
+     WHERE cabinet_id = ? AND upd_time >= ? AND upd_time < ?
+     GROUP BY hour ORDER BY hour`,
+    [cabinetId, dateFrom, dateTo]
+  );
+  return rows.map(r => ({ hour: r.hour, spend: Number(r.spend) }));
+}
+
 // === CPS Settings ===
 
 export async function getProductCpsSettings(cabinetId: number, nmId: number): Promise<DBProductCpsSettings | null> {

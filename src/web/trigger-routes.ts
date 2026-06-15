@@ -11,6 +11,7 @@ import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
 import { timingSafeEqual } from 'crypto';
 import { generateCabinetReport, sendCabinetReport } from '../services/cabinet-report';
+import { getHourlyCpoSeries } from '../services/cpo-hourly';
 
 const app = new Hono();
 
@@ -97,6 +98,26 @@ app.get('/api/trigger/cabinet-report/:cabinetId', async (c) => {
   try {
     const text = await generateCabinetReport(cabinetId, range);
     return c.json({ cabinetId, text: text ?? '', empty: text == null });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// GET /api/trigger/cpo-hourly/:cabinetId?hours=12
+// Hourly CPO series (orders from phone DB, spend from bidberry tables) for the
+// last `hours` MSK hours. Used by the WBPartners-Auto Telegram bot's /cpo
+// command to render an hourly CPO graph.
+app.get('/api/trigger/cpo-hourly/:cabinetId', async (c) => {
+  const cabinetId = parseInt(c.req.param('cabinetId'), 10);
+  if (!cabinetId || Number.isNaN(cabinetId)) {
+    return c.json({ error: 'invalid cabinetId' }, 400);
+  }
+  const hoursRaw = parseInt(c.req.query('hours') || '12', 10);
+  const hours = Number.isNaN(hoursRaw) ? 12 : hoursRaw;
+  try {
+    const series = await getHourlyCpoSeries(cabinetId, hours);
+    if (!series) return c.json({ error: 'cabinet not found' }, 404);
+    return c.json(series);
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }

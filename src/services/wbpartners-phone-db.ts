@@ -83,3 +83,40 @@ export function getPhoneTotalsByArticle(fromIso: string, toIso: string): PhoneAr
     return [];
   }
 }
+
+export interface PhoneHourTotal {
+  hour: string;    // "YYYY-MM-DD HH:00:00" (MSK wall-clock, matches MySQL spend buckets)
+  orders: number;  // active orders (Заказ/Выкуп) placed in that hour
+}
+
+/**
+ * Order counts bucketed by hour for a time window (MSK wall-clock), using the
+ * same active-status / non-stale filter as getPhoneTotalsByArticle. The hour
+ * key is space-formatted ("YYYY-MM-DD HH:00:00") to line up with the MySQL
+ * `DATE_FORMAT(..., '%Y-%m-%d %H:00:00')` spend buckets.
+ *
+ * @param fromIso  MSK wall-clock start, format "YYYY-MM-DDTHH:MM:SS"
+ * @param toIso    MSK wall-clock end (exclusive), same format
+ */
+export function getPhoneHourlyTotals(fromIso: string, toIso: string): PhoneHourTotal[] {
+  const handle = getDb();
+  if (!handle) return [];
+  try {
+    const rows = handle
+      .query(
+        `SELECT strftime('%Y-%m-%d %H:00:00', date_parsed) as hour,
+                COUNT(*) as cnt
+         FROM orders
+         WHERE date_parsed >= ? AND date_parsed < ?
+           AND status IN ('Заказ', 'Выкуп')
+           AND is_stale = 0
+         GROUP BY hour
+         ORDER BY hour`
+      )
+      .all(fromIso, toIso) as Array<{ hour: string; cnt: number }>;
+    return rows.map(r => ({ hour: r.hour, orders: Number(r.cnt) }));
+  } catch (e: any) {
+    console.error(`[wbpartners-phone] hourly query failed: ${e.message}`);
+    return [];
+  }
+}

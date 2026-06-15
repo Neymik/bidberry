@@ -3,5 +3,6 @@ python-telegram-bot[socks]
 python-dotenv
 requests
 Pillow
+matplotlib
 fastapi
 uvicorn[standard]

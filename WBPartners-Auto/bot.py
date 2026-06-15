@@ -67,6 +67,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/count_yesterday — итоги за вчера\n"
         "/count ГГГГ-ММ-ДД — итоги за дату\n"
         "/count ГГГГ-ММ-ДД ГГГГ-ММ-ДД — итоги за период\n"
+        "/cpo [часов] — график CPO по часам (по умолчанию 12)\n"
         "/status Заказ|Отказ|Выкуп|Возврат — фильтр по статусу\n"
         "/stats — сводка по заказам\n"
         "/csv [начало] [конец] — выгрузка CSV\n"
@@ -233,6 +234,91 @@ def _fetch_bidberry_report(start=None, end=None, label=None):
         return ("unavailable", reason)
 
 
+def _fetch_cpo_hourly(hours=12):
+    """GET the hourly CPO series from bidberry.
+
+    Returns a (status, payload) tuple like _fetch_bidberry_report:
+      "ok"          — payload is the parsed JSON dict (points/totals/...)
+      "unconfigured"— BIDBERRY_CABINET_ID not set
+      "unavailable" — HTTP/network failure; payload is a short reason
+    """
+    cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
+    if not cabinet_id:
+        return ("unconfigured", None)
+    base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
+    url = f"{base}/api/trigger/cpo-hourly/{cabinet_id}"
+    secret = os.getenv("TRIGGER_SECRET", "")
+    headers = {"X-Trigger-Secret": secret} if secret else {}
+    try:
+        import requests
+        r = requests.get(url, timeout=15, headers=headers, params={"hours": hours})
+        if not r.ok:
+            body = (r.text or "")[:200].replace("\n", " ")
+            reason = f"HTTP {r.status_code}"
+            print(f"[cpo] bidberry unavailable: {reason} body={body!r}")
+            return ("unavailable", reason)
+        return ("ok", r.json())
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        print(f"[cpo] bidberry fetch failed: {reason}")
+        return ("unavailable", reason)
+
+
+def _render_cpo_chart(data):
+    """Render the hourly CPO series to a PNG (BytesIO).
+
+    Orders are drawn as light bars (context) on the left axis; the CPO line
+    (₽/order) is drawn on the right axis, with hours where there were no
+    orders left as gaps. matplotlib is imported lazily so a missing install
+    fails only this command, not the whole bot.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    points = data.get("points", [])
+    labels = [p["label"] for p in points]
+    orders = [p.get("orders", 0) for p in points]
+    cpo = [p.get("cpo") for p in points]  # may contain None
+    x = list(range(len(points)))
+
+    fig, ax1 = plt.subplots(figsize=(10, 4.5))
+    ax1.bar(x, orders, color="#cbd5e1", alpha=0.7, label="Заказы")
+    ax1.set_ylabel("Заказы", color="#64748b")
+    ax1.tick_params(axis="y", labelcolor="#64748b")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax1.set_ylim(bottom=0)
+
+    ax2 = ax1.twinx()
+    cx = [i for i, v in zip(x, cpo) if v is not None]
+    cy = [v for v in cpo if v is not None]
+    if cx:
+        ax2.plot(cx, cy, color="#2563eb", marker="o", linewidth=2, label="CPO, ₽")
+        for i, v in zip(cx, cy):
+            ax2.annotate(f"{v}", (i, v), textcoords="offset points",
+                         xytext=(0, 6), ha="center", fontsize=8, color="#1d4ed8")
+    ax2.set_ylabel("CPO, ₽", color="#2563eb")
+    ax2.tick_params(axis="y", labelcolor="#2563eb")
+    ax2.set_ylim(bottom=0)
+
+    totals = data.get("totals", {})
+    tcpo = totals.get("cpo")
+    tcpo_str = f"{tcpo}" if tcpo is not None else "—"
+    title = f"CPO по часам — {data.get('cabinetName', '')} (МСК)"
+    sub = (f"Σ заказы: {totals.get('orders', 0)}  ·  "
+           f"Σ бюджет: {round(totals.get('spend', 0))} ₽  ·  CPO: {tcpo_str} ₽")
+    ax1.set_title(f"{title}\n{sub}", fontsize=11)
+    ax1.grid(axis="y", linestyle=":", alpha=0.3)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 @restricted
 async def count_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
@@ -310,6 +396,49 @@ async def csv_yesterday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await csv_cmd(update, context)
 
 
+@restricted
+async def cpo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send an hourly CPO graph for the last N hours (default 12)."""
+    hours = 12
+    if context.args:
+        try:
+            hours = max(1, min(48, int(context.args[0])))
+        except ValueError:
+            pass
+
+    status, payload = _fetch_cpo_hourly(hours)
+    if status == "unconfigured":
+        await update.message.reply_text("BIDBERRY_CABINET_ID не задан — график недоступен.")
+        return
+    if status != "ok" or not isinstance(payload, dict):
+        await update.message.reply_text(f"Бэкенд недоступен: {payload}")
+        return
+
+    points = payload.get("points", [])
+    if not points or all((p.get("orders", 0) == 0 and p.get("spend", 0) == 0) for p in points):
+        await update.message.reply_text(f"Нет данных за последние {hours} ч.")
+        return
+
+    try:
+        buf = _render_cpo_chart(payload)
+    except ImportError:
+        await update.message.reply_text("matplotlib не установлен на сервере — не могу построить график.")
+        return
+    except Exception as e:
+        print(f"[cpo] render failed: {type(e).__name__}: {e}")
+        await update.message.reply_text("Не удалось построить график.")
+        return
+
+    totals = payload.get("totals", {})
+    tcpo = totals.get("cpo")
+    tcpo_str = f"{tcpo}" if tcpo is not None else "—"
+    caption = (
+        f"\U0001f4c8 CPO по часам за {hours} ч (МСК)\n"
+        f"Заказы: {totals.get('orders', 0)} · Бюджет: {round(totals.get('spend', 0))} ₽ · CPO: {tcpo_str} ₽"
+    )
+    await update.message.reply_photo(photo=buf, caption=caption)
+
+
 async def _on_error(update, context):
     """Surface handler errors in monitor.log instead of silently swallowing them.
 
@@ -333,6 +462,7 @@ def build_app():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("count", count_cmd))
     app.add_handler(CommandHandler("count_yesterday", count_yesterday_cmd))
+    app.add_handler(CommandHandler("cpo", cpo_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("csv", csv_cmd))
     app.add_handler(CommandHandler("csv_yesterday", csv_yesterday_cmd))
