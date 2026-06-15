@@ -187,6 +187,21 @@ const BOARD_HTML = /* html */ `<!DOCTYPE html>
   .card .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .card .actions select, .card .actions button { font-size: 12px; padding: 3px 8px; }
   .desc { font-size: 12px; color: #cbd5e1; margin: 6px 0; white-space: pre-wrap; }
+  /* List view */
+  .list { display: flex; flex-direction: column; gap: 6px; }
+  .lrow { display: flex; align-items: center; gap: 10px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; }
+  .lrow .lid { color: #64748b; font-size: 12px; min-width: 32px; }
+  .lrow .ltitle { font-weight: 600; font-size: 14px; flex: 1; min-width: 140px; }
+  .lrow .lmeta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .lrow .actions { display: flex; gap: 6px; }
+  .lrow .actions select, .lrow .actions button { font-size: 12px; padding: 3px 8px; }
+  .st-in_progress { background:#1e3a5f; color:#bfdbfe; }
+  .st-review { background:#3b2f5e; color:#ddd6fe; }
+  .st-blocked { background:#7f1d1d; color:#fecaca; }
+  .st-todo { background:#334155; color:#cbd5e1; }
+  .st-backlog { background:#1e293b; color:#94a3b8; border:1px solid #334155; }
+  .st-done { background:#14532d; color:#bbf7d0; }
+  @media (max-width: 720px) { .lrow { flex-wrap: wrap; } }
   dialog { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 12px; padding: 20px; width: min(520px, 92vw); }
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog label { display: block; font-size: 12px; color: #94a3b8; margin: 10px 0 4px; }
@@ -208,6 +223,7 @@ const BOARD_HTML = /* html */ `<!DOCTYPE html>
   <button onclick="setIdentity()" id="whoBtn" title="Укажите своё имя (автор / исполнитель)">👤 …</button>
   <button onclick="setSecret()" title="Секрет для записи">🔑</button>
   <button class="primary" onclick="openNew()">+ Новая задача</button>
+  <button onclick="toggleView()" id="viewBtn" title="Переключить вид (список / канбан)">☷ Канбан</button>
   <button onclick="load()" title="Обновить">↻</button>
 </header>
 <main>
@@ -244,6 +260,19 @@ const LABELS = { backlog:'Бэклог', todo:'К выполнению', in_prog
 const PRI_LABELS = { low:'низкий', medium:'средний', high:'высокий', urgent:'срочно' };
 let SECRET = localStorage.getItem('devTaskSecret') || '';
 let WHO = localStorage.getItem('devTaskWho') || '';
+let VIEW = localStorage.getItem('devTaskView') || 'list';
+let DATA = { tasks: [], stats: {} };
+
+function toggleView() {
+  VIEW = VIEW === 'list' ? 'kanban' : 'list';
+  localStorage.setItem('devTaskView', VIEW);
+  renderViewBtn();
+  render();
+}
+function renderViewBtn() {
+  // Label shows the view you'll switch TO.
+  document.getElementById('viewBtn').textContent = VIEW === 'list' ? '☷ Канбан' : '☰ Список';
+}
 
 function setSecret() {
   const v = prompt('Секрет для записи (TRIGGER_SECRET). Хранится только локально в этом браузере.', SECRET);
@@ -271,19 +300,61 @@ function esc(s) { return (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&l
 
 async function load() {
   const q = document.getElementById('search').value.trim();
-  const data = await api('GET', '/api/dev-tasks' + (q ? '?q=' + encodeURIComponent(q) : ''));
+  DATA = await api('GET', '/api/dev-tasks' + (q ? '?q=' + encodeURIComponent(q) : ''));
   document.getElementById('stats').textContent =
-    STATUSES.map(s => (data.stats[s] ? LABELS[s] + ': ' + data.stats[s] : null)).filter(Boolean).join('  ·  ');
+    STATUSES.map(s => (DATA.stats[s] ? LABELS[s] + ': ' + DATA.stats[s] : null)).filter(Boolean).join('  ·  ');
+  render();
+}
+
+function render() {
   const board = document.getElementById('board');
   board.innerHTML = '';
+  if (!DATA.tasks.length) { board.className = ''; board.innerHTML = '<div class="muted">Задач нет</div>'; return; }
+  if (VIEW === 'kanban') { board.className = 'cols'; renderKanban(board); }
+  else { board.className = 'list'; renderList(board); }
+}
+
+function renderKanban(board) {
   for (const status of STATUSES) {
-    const items = data.tasks.filter(t => t.status === status);
+    const items = DATA.tasks.filter(t => t.status === status);
     const col = document.createElement('div');
     col.className = 'col';
     col.innerHTML = '<h2>' + LABELS[status] + '<span>' + items.length + '</span></h2>';
     for (const t of items) col.appendChild(card(t));
     board.appendChild(col);
   }
+}
+
+// Flat list ordered as the API returns (active first, then by priority, recent).
+function renderList(board) {
+  for (const t of DATA.tasks) board.appendChild(row(t));
+}
+
+function row(t) {
+  const el = document.createElement('div');
+  el.className = 'lrow';
+  if (t.description) el.title = t.description;
+  const tags = (t.tags || '').split(',').map(s => s.trim()).filter(Boolean)
+    .map(tg => '<span class="tag">' + esc(tg) + '</span>').join(' ');
+  el.innerHTML =
+    '<span class="lid">#' + t.id + '</span>' +
+    '<span class="pill st-' + t.status + '">' + LABELS[t.status] + '</span>' +
+    '<span class="pill pri-' + t.priority + '">' + (PRI_LABELS[t.priority] || t.priority) + '</span>' +
+    '<span class="ltitle">' + esc(t.title) + '</span>' +
+    '<span class="lmeta">' +
+      (t.assignee ? '<span class="assignee">@' + esc(t.assignee) + '</span>' : '') +
+      (t.branch ? '<span class="muted">⎇ ' + esc(t.branch) + '</span>' : '') +
+      tags +
+    '</span>' +
+    '<span class="actions">' +
+      '<select onchange="move(' + t.id + ', this.value)">' +
+        STATUSES.map(s => '<option value="' + s + '"' + (s===t.status?' selected':'') + '>' + LABELS[s] + '</option>').join('') +
+      '</select>' +
+      '<button onclick="claim(' + t.id + ')">Взять</button>' +
+      '<button onclick="edit(' + t.id + ')">Изменить</button>' +
+      '<button class="danger" onclick="del(' + t.id + ')">✕</button>' +
+    '</span>';
+  return el;
 }
 
 function card(t) {
@@ -366,6 +437,7 @@ async function save() {
 document.getElementById('search').addEventListener('input', () => { clearTimeout(window._t); window._t = setTimeout(load, 250); });
 fillSelects();
 renderWho();
+renderViewBtn();
 load();
 </script>
 </body>
