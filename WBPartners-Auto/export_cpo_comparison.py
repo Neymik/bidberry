@@ -103,6 +103,34 @@ def our_orders(con, msk, vc, date, tlabel, live=True):
     return con.execute(q, p).fetchone()[0]
 
 
+def fetch_auto_spend(nmids, day_from, day_to):
+    """Per-nmID per-day WB ad spend from bidberry, used to fill CPO for days the
+    manager hasn't entered manual spend for.
+
+    Returns {nmid_str: {"YYYY-MM-DD": spend_rub}}; empty dict on any failure or
+    when BIDBERRY_CABINET_ID isn't configured (the sheet then just leaves those
+    auto cells blank, same as before this feature).
+    """
+    cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
+    if not cabinet_id or not nmids:
+        return {}
+    base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
+    url = f"{base}/api/trigger/product-daily-spend/{cabinet_id}"
+    secret = os.getenv("TRIGGER_SECRET", "")
+    headers = {"X-Trigger-Secret": secret} if secret else {}
+    params = {"nmIds": ",".join(str(n) for n in nmids), "from": day_from, "to": day_to}
+    try:
+        import requests
+        r = requests.get(url, timeout=15, headers=headers, params=params)
+        if not r.ok:
+            print(f"[cpo] auto-spend unavailable: HTTP {r.status_code}")
+            return {}
+        return r.json().get("spend", {}) or {}
+    except Exception as e:
+        print(f"[cpo] auto-spend fetch failed: {type(e).__name__}: {e}")
+        return {}
+
+
 def authorize():
     creds = Credentials.from_service_account_file(
         KEY, scopes=["https://www.googleapis.com/auth/spreadsheets"])
@@ -145,6 +173,13 @@ def export(gc=None):
                 if d:
                     keys.add((d, label))
 
+        # Automatic per-product daily ad spend from bidberry (WB API), keyed by
+        # nmID/day. Used to compute CPO for days the manager hasn't filled manual
+        # spend for, so every row gets a CPO live / CPO ever — not just manual days.
+        day_to = max((d for (d, _l) in keys), default=SINCE)
+        auto_spend = fetch_auto_spend(
+            [a for a in art.values() if a], SINCE, day_to)
+
         def cpo(spend, n):
             return round(spend / n) if (spend and n) else ""
 
@@ -162,10 +197,15 @@ def export(gc=None):
             n_live = our_orders(con, msk, vc, date, tlabel, live=True)
             n_ever = our_orders(con, msk, vc, date, tlabel, live=False)
             if not m:
-                rows.append([date, label, str(art[vc]), "весь день", "",
+                # No manual row for this day: take spend automatically from WB API
+                # (full day) so CPO live/ever are still computed. Δ-vs-manual stays
+                # blank — there's no manual order count to compare against.
+                sp = auto_spend.get(str(art[vc]), {}).get(date)
+                cpo_live, cpo_ever = cpo(sp, n_live), cpo(sp, n_ever)
+                rows.append([date, label, str(art[vc]), "весь день", sp if sp else "",
                              "", "",
-                             n_live, "", "", "", "", "",
-                             n_ever, "", "", "", "", ""])
+                             n_live, "", "", cpo_live, "", "",
+                             n_ever, "", "", cpo_ever, "", ""])
                 continue
             win = "весь день" if m["t"] == "весь день" else f"≤{m['t']}"
             m_ord, m_cpo, spend = m["orders"], m["cpo"], m["spend"]

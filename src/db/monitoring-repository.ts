@@ -368,6 +368,32 @@ export async function getDailySpend(
   return rows.map(r => ({ day: String(r.day), spend: Number(r.spend) }));
 }
 
+/**
+ * Per-day spend from budget snapshots for specific campaigns.
+ * Mirrors getDailySpend (expense feed) but sources campaign_budget_snapshots,
+ * so callers can take max(expense, snapshot) per day like the daily report does.
+ */
+export async function getDailySpendFromSnapshots(
+  cabinetId: number,
+  campaignIds: number[],
+  dateFrom: string,
+  dateTo: string
+): Promise<{ day: string; spend: number }[]> {
+  if (campaignIds.length === 0) return [];
+  const placeholders = campaignIds.map(() => '?').join(',');
+  const rows = await query<any[]>(
+    `SELECT DATE_FORMAT(snapshot_at, '%Y-%m-%d') as day,
+            COALESCE(SUM(spend_since_prev), 0) as spend
+     FROM campaign_budget_snapshots
+     WHERE cabinet_id = ? AND campaign_id IN (${placeholders})
+       AND snapshot_at >= ? AND snapshot_at < ?
+       AND spend_since_prev IS NOT NULL
+     GROUP BY day ORDER BY day`,
+    [cabinetId, ...campaignIds, dateFrom, dateTo]
+  );
+  return rows.map(r => ({ day: String(r.day), spend: Number(r.spend) }));
+}
+
 export async function getDailyOrders(
   cabinetId: number,
   nmId: number,
