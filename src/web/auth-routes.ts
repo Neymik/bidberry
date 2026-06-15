@@ -53,6 +53,14 @@ app.get('/api/auth/check-admin', authMiddleware, adminMiddleware, (c) => {
   return c.body(null, 200);
 });
 
+// Internal: logged-in (= whitelisted) verification for nginx auth_request.
+// Login already enforces the whitelist, so any valid JWT means a whitelisted
+// user. Used to gate the dev task board (/admin/tasks) behind Telegram login
+// for the same whitelisted users that can use the app.
+app.get('/api/auth/check-user', authMiddleware, (c) => {
+  return c.body(null, 200);
+});
+
 // Internal: emulator auth verification for nginx auth_request
 app.get('/api/auth/check-emu', authMiddleware, async (c) => {
   const userId = c.get('userId' as never) as number;
