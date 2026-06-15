@@ -17,6 +17,7 @@ import { getWBClientForCabinet } from './api/wb-client';
 import dayjs from 'dayjs';
 import { assertJwtSecretConfigured } from './services/auth-service';
 import { migrateAllowedUsersAddTelegramId } from './db/cabinets-repository';
+import { ensureDevTasksSchema } from './db/dev-tasks-repository';
 
 const api = new Hono();
 
@@ -36,6 +37,10 @@ if (process.env.NODE_ENV !== 'test') {
   migrateAllowedUsersAddTelegramId().catch(err => {
     console.error(`[startup] allowed_users migration failed: ${err.message}`);
     // Don't crash — auth still works without the column, just less safely.
+  });
+  // Dev task board schema (idempotent). Non-fatal if it fails.
+  ensureDevTasksSchema().catch(err => {
+    console.error(`[startup] dev_tasks schema bootstrap failed: ${err.message}`);
   });
 }
 
@@ -573,6 +578,7 @@ console.log(`
 ║   • /import-export     - Import / Export              ║
 ║   • /monitoring        - CPS Monitoring               ║
 ║   • /admin             - Admin Panel                  ║
+║   • /admin/tasks       - Dev Task Board                ║
 ║                                                       ║
 ║   New API endpoints:                                  ║
 ║   • /api/cabinets              - Cabinet management   ║

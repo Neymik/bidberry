@@ -42,6 +42,51 @@ cd ~/bidberry && docker compose up -d --build app
 
 The WBPartners-Auto phone DB at `./WBPartners-Auto/orders.db` is bind-mounted into the app container (WBPartners-Auto lives inside this repo as of 2026-04-20).
 
+## Multi-Developer Workflow — Dev Task Board (READ FIRST)
+
+Multiple developers (and multiple Claude Code agents) share this one repo and one
+MySQL on `ostapLase`. To work in parallel with **minimal communication**, all work
+is coordinated through a shared **dev task board**. These rules are mandatory:
+
+1. **Before building any new feature/change, check the task board first.**
+   - Find whether the work already exists as a task and what its status is.
+   - If it exists and is `in_progress` with another `assignee` → it's already taken;
+     do not duplicate it. Coordinate via a task comment instead.
+   - If it does not exist → create it before starting.
+   - Check via CLI: `docker exec wb-analytics-app bun run src/cli/tasks.ts list`
+     (or `show <id>`), or the UI at `http://localhost:${APP_PORT:-3000}/admin/tasks`.
+
+2. **Claim before you touch code.** Set yourself as `assignee` and move the task to
+   `in_progress` so no one else (human or agent) starts the same thing:
+   `docker exec wb-analytics-app bun run src/cli/tasks.ts claim <id> <your-name>`.
+
+3. **Always commit AND push the relevant files after finishing a feature.** Never
+   leave completed work uncommitted in the shared working dir — others pull from
+   `main`. Commit only files relevant to the task, write a clear message, `git push`,
+   then mark the task: `... tasks.ts done <id> <your-name>` (add a `comment` if useful).
+
+4. **One task = one branch.** Record the branch on the task (`--branch feat/...` on
+   create, or the Edit dialog). Because every developer shares the single working
+   dir `/home/ostap/bidberry`, prefer a **git worktree per developer/agent** to avoid
+   stomping each other's uncommitted changes — see the board task for setup. At
+   minimum: never start a second feature while another's edits are uncommitted.
+
+**Board internals:** DB tables `dev_tasks` + `dev_task_events` (global, NOT cabinet-scoped).
+Repo `src/db/dev-tasks-repository.ts`, routes `src/web/dev-tasks-routes.ts`, CLI
+`src/cli/tasks.ts`. Reads are open; the REST API mutations require header
+`X-Trigger-Secret: $TRIGGER_SECRET` (the browser board prompts for it once via 🔑).
+Statuses: `backlog → todo → in_progress → review → done` (+ `blocked`).
+
+CLI quick reference:
+```bash
+docker exec wb-analytics-app bun run src/cli/tasks.ts list [status]
+docker exec wb-analytics-app bun run src/cli/tasks.ts add "Title" --desc "..." --priority high --tags "orders,api"
+docker exec wb-analytics-app bun run src/cli/tasks.ts claim <id> <who>
+docker exec wb-analytics-app bun run src/cli/tasks.ts status <id> <status> [who]
+docker exec wb-analytics-app bun run src/cli/tasks.ts comment <id> "note" [who]
+docker exec wb-analytics-app bun run src/cli/tasks.ts done <id> [who]
+```
+
 ## Docker (on ostapLase)
 
 - **Containers**: `wb-analytics-app` (Bun), `wb-analytics-mysql` (MySQL 8.0)

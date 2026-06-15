@@ -595,3 +595,34 @@ CREATE TABLE IF NOT EXISTS emu_orders (
   INDEX idx_first_seen (cabinet_id, first_seen),
   FOREIGN KEY (cabinet_id) REFERENCES cabinets(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =============================================
+-- Dev task board (developer + Claude Code coordination; NOT tenant data)
+-- Also bootstrapped idempotently at startup via ensureDevTasksSchema().
+-- =============================================
+CREATE TABLE IF NOT EXISTS dev_tasks (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(500) NOT NULL,
+  description TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'backlog',
+  priority VARCHAR(10) NOT NULL DEFAULT 'medium',
+  assignee VARCHAR(100),
+  tags VARCHAR(255),
+  branch VARCHAR(200),
+  created_by VARCHAR(100),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_status (status),
+  INDEX idx_assignee (assignee)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS dev_task_events (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  task_id INT NOT NULL,
+  author VARCHAR(100),
+  kind VARCHAR(20) NOT NULL DEFAULT 'comment',
+  body TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_task (task_id),
+  FOREIGN KEY (task_id) REFERENCES dev_tasks(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

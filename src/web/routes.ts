@@ -21,6 +21,7 @@ import emuIngestRoutes from './emulator-ingest-routes';
 import emuAdminRoutes from './emulator-admin-routes';
 import emuRoutes from './emulator-routes';
 import triggerRoutes from './trigger-routes';
+import devTasksRoutes from './dev-tasks-routes';
 
 const app = new Hono();
 
@@ -33,6 +34,12 @@ app.use('/static/*', serveStatic({ root: './public' }));
 // Public routes (no auth required)
 app.route('/', authRoutes);
 
+// Dev task board — reads open, writes guarded by TRIGGER_SECRET inside the
+// sub-app. Mounted BEFORE triggerRoutes on purpose: triggerRoutes registers a
+// global `/*` secret middleware that would otherwise also guard these routes.
+// Also excluded from the JWT `/api/*` middleware (see skip list below).
+app.route('/', devTasksRoutes);
+
 // Unauthenticated webhook routes (localhost-only via 127.0.0.1 binding)
 app.route('/', triggerRoutes);
 
@@ -41,6 +48,7 @@ app.use('/api/*', async (c, next) => {
   // Skip auth for auth endpoints and localhost webhook
   if (c.req.path.startsWith('/api/auth/') ||
       c.req.path.startsWith('/api/trigger/') ||
+      c.req.path.startsWith('/api/dev-tasks') ||
       c.req.path === '/api/orders/ingest' ||
       c.req.path === '/api/orders/heartbeat') return next();
   return authMiddleware(c, next);
