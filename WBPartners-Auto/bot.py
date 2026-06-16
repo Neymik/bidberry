@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from functools import wraps
 
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.error import RetryAfter
@@ -17,6 +18,36 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Bidberry web app — used by the Telegram deep-link login flow. The bot is the
+# only thing polling this token, so the website's "open Telegram to log in"
+# button (t.me/<bot>?start=<token>) lands here as `/start <token>`. We forward
+# the authenticated Telegram user to the app over localhost, gated by the shared
+# secret, and the app runs the whitelist check + issues the session.
+APP_INTERNAL_URL = os.getenv("APP_INTERNAL_URL", "http://127.0.0.1:3000")
+TRIGGER_SECRET = os.getenv("TRIGGER_SECRET", "")
+
+
+async def _confirm_web_login(token: str, user) -> str:
+    """POST the login token + Telegram user to the app. Returns a status string
+    ('confirmed' | 'denied' | 'expired') or raises on transport failure."""
+    payload = {
+        "token": token,
+        "telegram_user": {
+            "id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+        },
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{APP_INTERNAL_URL}/api/auth/telegram/confirm",
+            json=payload,
+            headers={"X-Trigger-Secret": TRIGGER_SECRET},
+        )
+        data = resp.json()
+        return data.get("status", "expired")
 
 
 def restricted(func):
@@ -48,8 +79,36 @@ def format_order(o):
     return "\n".join(lines)
 
 
-@restricted
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Deep-link web login: /start <token>. Open to anyone (the app enforces the
+    # whitelist) — this is NOT gated by TELEGRAM_CHAT_ID like the other commands.
+    if context.args and context.args[0]:
+        token = context.args[0]
+        try:
+            status = await _confirm_web_login(token, update.effective_user)
+        except Exception as exc:
+            print(f"  bot.py web login error: {type(exc).__name__}: {exc}")
+            await update.message.reply_text(
+                "⚠️ Не удалось связаться с сайтом. Попробуйте ещё раз."
+            )
+            return
+        if status == "confirmed":
+            await update.message.reply_text(
+                "✅ Вход выполнен! Вернитесь на сайт — он откроется автоматически."
+            )
+        elif status == "denied":
+            await update.message.reply_text(
+                "⛔ Доступ запрещён: ваш аккаунт не в списке разрешённых."
+            )
+        else:
+            await update.message.reply_text(
+                "⌛ Ссылка для входа устарела. Обновите страницу входа и попробуйте снова."
+            )
+        return
+
+    # Plain /start from the configured monitoring chat — show the welcome.
+    if str(update.effective_chat.id) != TELEGRAM_CHAT_ID:
+        return
     await update.message.reply_text(
         "\U0001f4e6 <b>WB Partners Monitor Bot</b>\n\n"
         "Используйте /help для списка команд",

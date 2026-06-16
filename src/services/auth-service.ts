@@ -98,6 +98,25 @@ export async function loginWithTelegram(data: TelegramAuthData): Promise<AuthRes
     throw new Error('Telegram auth data expired');
   }
 
+  return loginWithTelegramVerified(data);
+}
+
+/**
+ * Identity portion of login, AFTER the caller has authenticated the Telegram
+ * user by some means: whitelist check -> upsert user -> issue JWT.
+ *
+ * `loginWithTelegram` calls this after verifying the widget HMAC. The deep-link
+ * flow calls it from the /confirm endpoint, where trust comes from the bot
+ * talking to us over localhost with the shared secret and a Telegram-
+ * authenticated update — no client-supplied hash to verify.
+ */
+export async function loginWithTelegramVerified(data: {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  photo_url?: string;
+}): Promise<AuthResponse> {
   // Whitelist check (dual-mode): telegram_id wins; fall back to a pending
   // username row and lock it on success.
   const allowed = await checkWhitelist(data);
