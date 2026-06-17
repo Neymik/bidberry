@@ -234,6 +234,29 @@ def upsert_order(order_dict):
         conn.close()
 
 
+def get_latest_order_dt():
+    """Most recent order date_parsed in the DB as a datetime, or None if empty.
+
+    Used by the monitor's startup catch-up to size the backfill window: the gap
+    between this and now() is how long capture was (potentially) interrupted.
+    date_parsed is stored ISO, so MAX() is chronological.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(date_parsed) AS m FROM orders WHERE is_stale = 0"
+        ).fetchone()
+        val = row["m"] if row else None
+        if not val:
+            return None
+        try:
+            return datetime.fromisoformat(val)
+        except ValueError:
+            return None
+    finally:
+        conn.close()
+
+
 def get_all_keys():
     """Return set of currently-live order keys (excludes soft-deleted rows).
 

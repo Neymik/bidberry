@@ -65,8 +65,13 @@ device:
 | Job | Cadence | What it does |
 |-----|---------|--------------|
 | `monitor` | `REFRESH_INTERVAL` (180s) | Refresh feed, parse top, save new orders, apply inline status transitions for cards still at the top of the feed |
-| `rescan_shallow` | `RESCAN_SHALLOW_INTERVAL_SEC` (3600s default) | Scroll back ~24h and update DB statuses for any key whose parsed status differs |
-| `rescan_deep` | `RESCAN_DEEP_INTERVAL_SEC` (86400s default) | Same, ~72h lookback — catches lingering Выкуп/Возврат transitions |
+| `rescan_shallow` | `RESCAN_SHALLOW_INTERVAL_SEC` (3600s default) | Scroll back ~24h: update statuses AND upsert missing orders (`insert_missing=True`) |
+| `rescan_deep` | `RESCAN_DEEP_INTERVAL_SEC` (86400s default) | Same, ~72h lookback (`RESCAN_DEEP_MAX_SCROLLS`=1000 cap) — catches lingering transitions and deeper gaps |
+
+Plus a one-shot **startup catch-up** (`run_startup_catchup`) before the loop: on
+every (re)start it scrolls back to the newest order already in the DB minus a
+margin and upserts anything missing, so an outage/deploy/manual-stop self-heals
+without a manual `recount_today.py`.
 
 Why two layers: `collect_new_orders` stops scrolling at the first known key it
 encounters, so inline status detection only catches transitions for cards
@@ -88,9 +93,16 @@ already-transitioned order at once — without the env var that's dozens of
 Telegram messages and likely a 429. Drop the env var on the next restart
 for normal alert behavior.
 
-**Rescan does NOT insert new rows.** Status-update-only by design. New
-orders below the monitor boundary are picked up when the next monitor
-cycle's `pull_to_refresh` re-tops the feed, or by manual `recount_today.py`.
+**Rescans now ALSO insert missing rows (self-recovery).** With
+`insert_missing=True` (shallow, deep, and the startup catch-up), a card whose
+key isn't in `known_orders` is upserted — so orders missed during a
+downtime/stall are backfilled automatically (idempotent via UNIQUE key,
+summarized as a single `🩹 added N` Telegram line, never per-order spam). The
+adaptive scroll budget (loop exits on crossing `cutoff_dt`; deep/catch-up use a
+larger cap) ensures high-volume gaps are actually reached — the June-15 gap
+needed 734 scrolls, far past the old status-only 200 cap. `recount_today.py`
+remains for manual one-off backfills but is no longer needed after a routine
+outage.
 
 **`recount_today.py` still requires the service to be stopped** (its
 `is_service_active()` gate is unchanged). The new rescans run *inside*

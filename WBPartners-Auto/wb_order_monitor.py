@@ -20,6 +20,7 @@ from db import (
     enqueue_pending_telegram, list_pending_telegram,
     delete_pending_telegram, bump_pending_telegram_attempts,
     get_key_status_map, update_order_status, TERMINAL_STATUSES,
+    get_latest_order_dt,
 )
 from bot import run_bot_thread
 from api import run_api_thread
@@ -53,6 +54,20 @@ SHEETS_EXPORT_INTERVAL_SEC  = int(os.getenv("SHEETS_EXPORT_INTERVAL_SEC", "900")
 SHALLOW_RESCAN_LOOKBACK_HOURS = 24
 DEEP_RESCAN_LOOKBACK_HOURS    = 72
 RESCAN_MAX_SCROLLS = 200
+# Deep rescan now also UPSERTS missing orders (self-recovery), so it needs a
+# bigger scroll ceiling than the status-only 200 to actually reach its lookback
+# on high-volume days (June-15 gap needed 734 scrolls). Adaptive: the loop still
+# exits early the moment it crosses cutoff_dt; this is just the safety cap.
+RESCAN_DEEP_MAX_SCROLLS = int(os.getenv("RESCAN_DEEP_MAX_SCROLLS", "1000"))
+
+# Startup catch-up: after any downtime (manual stop, deploy, reboot, crash that
+# outlived a cycle), scroll back to the newest order we already have (minus a
+# margin) and UPSERT anything missing, so the gap self-heals without a manual
+# recount_today.py. Bounded by a hard scroll cap and a max-lookback clamp.
+BACKFILL_MAX_SCROLLS        = int(os.getenv("BACKFILL_MAX_SCROLLS", "3000"))
+BACKFILL_MARGIN_HOURS       = float(os.getenv("BACKFILL_MARGIN_HOURS", "2"))
+BACKFILL_MAX_LOOKBACK_HOURS = float(os.getenv("BACKFILL_MAX_LOOKBACK_HOURS", "168"))
+STARTUP_CATCHUP_MIN_GAP_MIN = float(os.getenv("STARTUP_CATCHUP_MIN_GAP_MIN", "10"))
 
 # Status badge emoji map; mirrors the canonical maps in bot.py:35,130 so the
 # new-order, inline-transition, and rescan-digest alerts use the same glyphs.
@@ -980,16 +995,22 @@ def collect_new_orders(d, known_orders):
     return list(reversed(new_orders.values())), status_updates
 
 
-def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
-    """Scroll back to cutoff_dt and update DB statuses for any key whose
-    parsed status differs from the stored value.
+def rescan_for_status_changes(d, known_orders, cutoff_dt, label,
+                              max_scrolls=RESCAN_MAX_SCROLLS, insert_missing=False):
+    """Scroll back to cutoff_dt and reconcile the DB with the feed.
 
-    Status-update-only — does NOT insert new rows. New orders below the
-    monitor boundary are picked up when the next monitor cycle's
-    pull_to_refresh re-tops the feed, or by manual recount_today.py.
+    Always updates DB statuses for any key whose parsed status differs from the
+    stored value. When insert_missing=True it ALSO upserts orders we never
+    captured (placed during a downtime/stall) — this is what makes outages
+    self-heal instead of needing a manual recount_today.py. Inserts are
+    idempotent (key is UNIQUE) and never alerted per-order, only summarized.
+
+    max_scrolls is the safety ceiling; the real exit is crossing cutoff_dt.
+    Deep/catch-up callers pass a larger cap so high-volume days are fully
+    covered.
 
     Mutates known_orders in place so the next monitor cycle sees the
-    updated statuses.
+    updated statuses and the newly-inserted keys.
 
     Honors RESCAN_INITIAL_SILENT=1 — the first deploy reconciles every
     already-transitioned order at once, which would blast dozens of
@@ -1011,10 +1032,12 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
 
     seen_keys = set()
     transitions = []   # list of (key, old, new, card)
+    inserted = []      # cards upserted as missing (insert_missing only)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scrolls_used = 0
     reached_cutoff = False
 
-    for scroll_i in range(RESCAN_MAX_SCROLLS + 1):
+    for scroll_i in range(max_scrolls + 1):
         scrolls_used = scroll_i
         cards, _dropped = parse_orders_from_hierarchy(d)
         if _last_parse_reason == "error_screen":
@@ -1038,6 +1061,16 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
                 if new != old and update_order_status(key, new):
                     known_orders[key] = new
                     transitions.append((key, old, new, c))
+            elif insert_missing:
+                # Order we never captured (placed while we were down/stalled).
+                # Upsert so the gap self-heals; UNIQUE key keeps it idempotent.
+                c["first_seen"] = now_str
+                try:
+                    if upsert_order(c):
+                        known_orders[key] = c["status"]
+                        inserted.append(c)
+                except Exception as e:
+                    print(f"  [{label} rescan] insert failed for {key}: {e}")
 
         if oldest_on_screen is not None and oldest_on_screen < cutoff_dt:
             reached_cutoff = True
@@ -1051,19 +1084,25 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
                 btn.click()
                 time.sleep(3)
 
-        if scroll_i < RESCAN_MAX_SCROLLS:
+        if scroll_i < max_scrolls:
             adb_swipe(w // 2, int(h * 0.70), w // 2, int(h * 0.40), 300)
             time.sleep(SCROLL_PAUSE)
 
     print(f"  [{label} rescan] scanned {len(seen_keys)} unique keys, "
-          f"updated {len(transitions)}, scrolls={scrolls_used}, "
-          f"reached_cutoff={reached_cutoff}")
+          f"updated {len(transitions)}, inserted {len(inserted)}, "
+          f"scrolls={scrolls_used}, reached_cutoff={reached_cutoff}")
 
-    if not transitions:
+    if not transitions and not inserted:
         return
 
     if os.getenv("RESCAN_INITIAL_SILENT") == "1":
         print(f"  [{label} rescan] alerts suppressed (RESCAN_INITIAL_SILENT=1)")
+        return
+
+    # Backfill-only result (no status changes): one summary line, never per-order
+    # spam — a big catch-up can insert hundreds of cards at once.
+    if not transitions:
+        send_telegram(f"🩹 <b>{label}: добавлено {len(inserted)} пропущенных заказов</b>")
         return
 
     # Digest: chunk transitions through _chunk_messages so a long window of
@@ -1077,7 +1116,8 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label):
             f"Артикул: <code>{card.get('article', '?')}</code> | "
             f"{card.get('price', '?')} | {card.get('arrival_city', '?')}"
         )
-    header = f"🔄 <b>Смена статусов ({label}, {len(transitions)})</b>\n\n———\n\n"
+    backfill_note = f", добавлено {len(inserted)}" if inserted else ""
+    header = f"🔄 <b>Смена статусов ({label}, {len(transitions)}{backfill_note})</b>\n\n———\n\n"
     chunks = _chunk_messages(parts)
     MAX_CHUNKS = 3
     if len(chunks) > MAX_CHUNKS:
@@ -1135,12 +1175,59 @@ def run_sheets_export_cycle(d, state):
 
 def run_shallow_rescan_cycle(d, state):
     cutoff = datetime.now() - timedelta(hours=SHALLOW_RESCAN_LOOKBACK_HOURS)
-    rescan_for_status_changes(d, state["known_orders"], cutoff, "shallow")
+    # insert_missing: hourly recovery of recently-missed orders (e.g. a short
+    # stall that stayed within this run). Keeps the cheap 200-scroll cap.
+    rescan_for_status_changes(d, state["known_orders"], cutoff, "shallow",
+                              insert_missing=True)
 
 
 def run_deep_rescan_cycle(d, state):
     cutoff = datetime.now() - timedelta(hours=DEEP_RESCAN_LOOKBACK_HOURS)
-    rescan_for_status_changes(d, state["known_orders"], cutoff, "deep")
+    # insert_missing + bigger budget: daily deep backfill of anything missed in
+    # the last 72h, the safety net under the hourly shallow pass.
+    rescan_for_status_changes(d, state["known_orders"], cutoff, "deep",
+                              max_scrolls=RESCAN_DEEP_MAX_SCROLLS, insert_missing=True)
+
+
+def run_startup_catchup(d, known_orders):
+    """After a (re)start, backfill any orders missed while we were down.
+
+    Scrolls back to the newest order already in the DB (minus a margin) and
+    upserts anything missing, so an outage/deploy/manual-stop self-heals without
+    a manual recount_today.py. No-op on a brief restart (gap below
+    STARTUP_CATCHUP_MIN_GAP_MIN) or an empty DB. Bounded by BACKFILL_MAX_SCROLLS
+    and clamped to BACKFILL_MAX_LOOKBACK_HOURS so a very old DB can't trigger an
+    unbounded scroll.
+    """
+    last_seen = get_latest_order_dt()
+    if last_seen is None:
+        print("[catchup] empty DB — skipping startup backfill")
+        return
+    now = datetime.now()
+    gap_min = (now - last_seen).total_seconds() / 60
+    if gap_min < STARTUP_CATCHUP_MIN_GAP_MIN:
+        print(f"[catchup] last order {gap_min:.0f} min ago — no meaningful gap, skipping")
+        return
+    cutoff = last_seen - timedelta(hours=BACKFILL_MARGIN_HOURS)
+    floor = now - timedelta(hours=BACKFILL_MAX_LOOKBACK_HOURS)
+    if cutoff < floor:
+        print(f"[catchup] gap {gap_min / 60:.1f}h exceeds max lookback "
+              f"{BACKFILL_MAX_LOOKBACK_HOURS}h — clamping")
+        cutoff = floor
+    print(f"[catchup] gap {gap_min:.0f} min since last order — "
+          f"backfilling from {cutoff.isoformat()}")
+    try:
+        rescan_for_status_changes(d, known_orders, cutoff, "catchup",
+                                  max_scrolls=BACKFILL_MAX_SCROLLS, insert_missing=True)
+    except Exception as e:
+        import traceback
+        print(f"[catchup] backfill failed: {e}")
+        traceback.print_exc()
+    finally:
+        try:
+            navigate_to_orders(d)
+        except Exception as e:
+            print(f"[catchup] post-backfill renavigate failed: {e}")
 
 
 @dataclass
@@ -1411,6 +1498,10 @@ def main():
     )
 
     state = {"known_orders": known_orders, "cycle": 0}
+    # Self-recovery: backfill anything missed while we were down before steady
+    # state begins. known_orders is the same dict held in state, so inserts here
+    # are visible to the orchestrator's first monitor cycle.
+    run_startup_catchup(d, known_orders)
     orchestrator_loop(d, state)
 
 
