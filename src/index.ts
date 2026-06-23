@@ -548,6 +548,12 @@ scheduler.registerTask('cabinet-report', 15 * 60 * 1000, async () => {
   }
 });
 
+// CPO guard: alert when a product's today CPO is out of line (alert-only).
+import { runCpoGuard } from './services/cpo-guard';
+scheduler.registerTask('cpo-guard', 15 * 60 * 1000, async () => {
+  await runCpoGuard();
+});
+
 // Emulator health check
 import { healthCheck as emuHealthCheck } from './services/emulator-orchestrator';
 scheduler.registerTask('emulator-health-check', 60_000, async () => {

@@ -34,51 +34,49 @@ export type ReportRange = {
   label: string;
 };
 
+/** One product's today CPO breakdown. cpo is null when there are 0 orders. */
+export type CpoRow = {
+  vendorCode: string;
+  article: string;
+  phoneOrders: number;
+  apiOrders: number;
+  spend: number;
+  cpo: number | null;
+};
+
+/** Per-cabinet CPO breakdown: per-product rows + blended totals. */
+export type CpoBreakdown = {
+  rows: CpoRow[];
+  totalPhoneOrders: number;
+  totalApiOrders: number;
+  totalSpend: number;
+  totalCpo: number | null;
+  startSql: string;
+  endSql: string;
+};
+
 /**
- * Build the report text for a cabinet. Returns null if there's nothing to report.
- * Without `range`, reports on "today from Moscow midnight" (the default the
- * scheduler and trigger webhook use).
+ * Compute per-product CPO for a cabinet over an MSK window (today by default).
+ * Single source of truth shared by generateCabinetReport and the CPO guard.
+ *
+ * ORDERS come from the phone DB (authoritative); SPEND is max(snapshot,
+ * expense) over each product's campaigns; CPO = spend / phoneOrders. Returns
+ * null when the phone reports no orders in the window.
  */
-export async function generateCabinetReport(
+export async function computeCabinetCpo(
   cabinetId: number,
-  range?: ReportRange,
-): Promise<string | null> {
-  const cabinet = await cabinetsRepo.getCabinetById(cabinetId);
-  if (!cabinet) return null;
-
-  // Moscow midnight boundaries. All bidberry DATETIME columns are stored as
-  // Moscow wall-clock (see db/monitoring-repository.ts timezone helpers).
-  // The phone DB uses `date_parsed` which is also MSK wall-clock, stored as
-  // ISO string without TZ. So one MSK range covers both sources.
-  const nowMsk = dayjs().add(MSK_OFFSET_HOURS, 'hour');
-  const mskToday = nowMsk.startOf('day');
-  const defaultStartSql = mskToday.format('YYYY-MM-DD HH:mm:ss');
-  const defaultEndSql = mskToday.add(1, 'day').format('YYYY-MM-DD HH:mm:ss');
-
-  const startSql = range?.start ?? defaultStartSql;
-  const endSql = range?.end ?? defaultEndSql;
+  startSql: string,
+  endSql: string,
+): Promise<CpoBreakdown | null> {
   // Phone DB stores date_parsed in ISO format with 'T' separator
   const startIso = startSql.replace(' ', 'T');
   const endIso = endSql.replace(' ', 'T');
-  const headerLabel = range?.label ?? `${nowMsk.format('DD.MM HH:mm')} МСК`;
 
   // 1. Orders from the phone (authoritative source)
   const phoneTotals = getPhoneTotalsByArticle(startIso, endIso);
   if (phoneTotals.length === 0) return null;
 
-  // 2. Ad spend + WB API orders per product
-  //    spend       — bidberry tables, from WB Advert API
-  //    apiOrders   — bidberry `orders` table, from WB Statistics API
-  //    phoneOrders — authoritative, used for CPC calculation
-  type Row = {
-    vendorCode: string;
-    article: string;
-    phoneOrders: number;
-    apiOrders: number;
-    spend: number;
-    cpo: number | null;
-  };
-  const rows: Row[] = [];
+  const rows: CpoRow[] = [];
   let totalPhoneOrders = 0;
   let totalApiOrders = 0;
   let totalSpend = 0;
@@ -134,6 +132,39 @@ export async function generateCabinetReport(
   // Sort by phone orders DESC
   rows.sort((a, b) => b.phoneOrders - a.phoneOrders);
 
+  const totalCpo = totalPhoneOrders > 0 ? Math.round(totalSpend / totalPhoneOrders) : null;
+  return { rows, totalPhoneOrders, totalApiOrders, totalSpend, totalCpo, startSql, endSql };
+}
+
+/**
+ * Build the report text for a cabinet. Returns null if there's nothing to report.
+ * Without `range`, reports on "today from Moscow midnight" (the default the
+ * scheduler and trigger webhook use).
+ */
+export async function generateCabinetReport(
+  cabinetId: number,
+  range?: ReportRange,
+): Promise<string | null> {
+  const cabinet = await cabinetsRepo.getCabinetById(cabinetId);
+  if (!cabinet) return null;
+
+  // Moscow midnight boundaries. All bidberry DATETIME columns are stored as
+  // Moscow wall-clock (see db/monitoring-repository.ts timezone helpers).
+  // The phone DB uses `date_parsed` which is also MSK wall-clock, stored as
+  // ISO string without TZ. So one MSK range covers both sources.
+  const nowMsk = dayjs().add(MSK_OFFSET_HOURS, 'hour');
+  const mskToday = nowMsk.startOf('day');
+  const defaultStartSql = mskToday.format('YYYY-MM-DD HH:mm:ss');
+  const defaultEndSql = mskToday.add(1, 'day').format('YYYY-MM-DD HH:mm:ss');
+
+  const startSql = range?.start ?? defaultStartSql;
+  const endSql = range?.end ?? defaultEndSql;
+  const headerLabel = range?.label ?? `${nowMsk.format('DD.MM HH:mm')} МСК`;
+
+  const breakdown = await computeCabinetCpo(cabinetId, startSql, endSql);
+  if (!breakdown) return null;
+  const { rows, totalPhoneOrders, totalApiOrders, totalSpend, totalCpo } = breakdown;
+
   const header = `📊 <b>${cabinet.name}</b> | ${headerLabel}\n`;
   const tableHeader = '\n<b>Артикул | Заказы тел/API | Бюджет | CPO</b>';
   const body = rows
@@ -143,7 +174,6 @@ export async function generateCabinetReport(
     })
     .join('\n');
 
-  const totalCpo = totalPhoneOrders > 0 ? Math.round(totalSpend / totalPhoneOrders) : null;
   const totalCpoStr = totalCpo != null ? formatRubles(totalCpo) : '—';
   const footer =
     `\n──────────────\n` +
