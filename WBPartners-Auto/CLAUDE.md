@@ -67,6 +67,8 @@ device:
 | `monitor` | `REFRESH_INTERVAL` (180s) | Refresh feed, parse top, save new orders, apply inline status transitions for cards still at the top of the feed |
 | `rescan_shallow` | `RESCAN_SHALLOW_INTERVAL_SEC` (3600s default) | Scroll back ~24h: update statuses AND upsert missing orders (`insert_missing=True`) |
 | `rescan_deep` | `RESCAN_DEEP_INTERVAL_SEC` (86400s default) | Same, ~72h lookback (`RESCAN_DEEP_MAX_SCROLLS`=1000 cap) — catches lingering transitions and deeper gaps |
+| `sheets_export` | `SHEETS_EXPORT_INTERVAL_SEC` (900s) | DB-only (no device): push 'Заказы' + 'Сравнение CPO' tabs to the Google Sheet |
+| `hourly_summary` | `HOURLY_SUMMARY_INTERVAL_SEC` (3600s) | DB-only (no device): post the hourly Telegram digest + 6h PNG bar chart |
 
 Plus a one-shot **startup catch-up** (`run_startup_catchup`) before the loop: on
 every (re)start it scrolls back to the newest order already in the DB minus a
@@ -79,8 +81,20 @@ above that boundary. Rescans cover everything below.
 
 **No history table.** `orders.status` is always the latest observed status —
 there is no `status_transitions` log. Transitions are observable only via
-the per-cycle Telegram alerts (one message per inline transition; chunked
-digest for rescan transitions) and the journalctl log lines.
+the hourly Telegram digest (counts folded in) and the journalctl log lines.
+
+**Alert policy (2026-06-23): quiet by default, hourly digest.** The old
+per-order new-order stream and the per-transition status alerts are GONE.
+New orders and status changes are no longer sent in realtime — they are
+rolled into one **hourly digest** (`run_hourly_summary_cycle`): last-60-min
+orders by status, status changes since the last digest, today's running
+total, top articles, and a **PNG bar chart** of the last `SUMMARY_GRAPH_HOURS`
+(6) hours via `sendPhoto` (matplotlib/Agg, falls back to text on render
+failure). A fully quiet hour sends nothing. **Only error/recovery alerts and
+the rare `🩹 backfill-added` self-recovery line remain realtime.** New orders
+are derived from the DB by order time (`date_parsed`); status changes are
+accumulated in the in-memory `_digest_transitions` list (lost on restart —
+acceptable, since the startup banner + next digest cover the gap).
 
 **`update_order_status` guards against UI-glitch downgrades.** A "Заказ"
 fallback (parser couldn't find a status badge) will never overwrite an

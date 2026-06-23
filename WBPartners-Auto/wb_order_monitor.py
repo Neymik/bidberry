@@ -9,6 +9,7 @@ import time
 import os
 import subprocess
 import requests
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
@@ -20,7 +21,7 @@ from db import (
     enqueue_pending_telegram, list_pending_telegram,
     delete_pending_telegram, bump_pending_telegram_attempts,
     get_key_status_map, update_order_status, TERMINAL_STATUSES,
-    get_latest_order_dt,
+    get_latest_order_dt, get_live_orders_in_range, count_live_orders_in_range,
 )
 from bot import run_bot_thread
 from api import run_api_thread
@@ -51,6 +52,11 @@ NO_PROGRESS_LIMIT = 3  # scrolls without any new card → break + warn
 SHALLOW_RESCAN_INTERVAL_SEC = int(os.getenv("RESCAN_SHALLOW_INTERVAL_SEC", "3600"))
 DEEP_RESCAN_INTERVAL_SEC    = int(os.getenv("RESCAN_DEEP_INTERVAL_SEC",    "86400"))
 SHEETS_EXPORT_INTERVAL_SEC  = int(os.getenv("SHEETS_EXPORT_INTERVAL_SEC", "900"))
+# Hourly digest: replaces the per-order Telegram stream. New orders and status
+# changes are no longer sent in realtime (errors still are) — they're rolled up
+# once an hour into one message with a PNG bar chart of the last N hours.
+HOURLY_SUMMARY_INTERVAL_SEC = int(os.getenv("HOURLY_SUMMARY_INTERVAL_SEC", "3600"))
+SUMMARY_GRAPH_HOURS         = int(os.getenv("SUMMARY_GRAPH_HOURS", "6"))
 SHALLOW_RESCAN_LOOKBACK_HOURS = 24
 DEEP_RESCAN_LOOKBACK_HOURS    = 72
 RESCAN_MAX_SCROLLS = 200
@@ -118,6 +124,25 @@ _recovering = False         # re-entrancy guard: handle_error_state calls naviga
                             # without this flag one failed cycle would burn through all tiers.
 _last_collect_reason = "ok"           # set by collect_new_orders when it bails on no_progress
 _consecutive_no_container = 0         # cycles in a row where the scrollable feed wasn't found
+
+# Status transitions observed since the last hourly digest. The orchestrator is
+# single-threaded (jobs run sequentially in one loop), so the monitor + rescan
+# cycles append and run_hourly_summary_cycle drains — no lock needed. Lost on a
+# restart (acceptable: the startup banner + next digest cover the gap, and new
+# orders are always recoverable from the DB). New orders are NOT accumulated
+# here — the digest derives those from the DB by order time.
+_digest_transitions = []
+
+
+def _record_transition(old, new, card):
+    """Stash one observed status change for the next hourly digest (folded in
+    instead of a realtime alert)."""
+    _digest_transitions.append({
+        "old": old,
+        "new": new,
+        "article": card.get("article", "?"),
+        "product": (card.get("product") or "")[:80],
+    })
 
 
 def trigger_bidberry_report():
@@ -212,6 +237,32 @@ def send_telegram(text):
         print(f"  Telegram send queued (reason={reason})")
     except Exception as e:
         print(f"  Telegram persist failed: {e}")
+
+
+def send_telegram_photo(png_bytes, caption):
+    """Send a PNG (sendPhoto) with an HTML caption. Falls back to a text-only
+    send_telegram(caption) if the photo send fails, so the digest is never lost.
+
+    Caption is bounded to Telegram's 1024-char sendPhoto limit by the caller;
+    the hourly digest caption is short by construction.
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        resp = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": ("orders.png", png_bytes, "image/png")},
+            timeout=20,
+        )
+        if resp.ok:
+            return True
+        print(f"  sendPhoto failed {resp.status_code}: {(resp.text or '')[:200]}")
+    except requests.RequestException as e:
+        print(f"  sendPhoto network error: {e}")
+    # Photo failed — deliver the caption as plain text so the digest still lands
+    # (and benefits from send_telegram's retry + pending-queue persistence).
+    send_telegram(caption)
+    return False
 
 
 def flush_pending_telegram(max_rows=20):
@@ -1099,37 +1150,15 @@ def rescan_for_status_changes(d, known_orders, cutoff_dt, label,
         print(f"  [{label} rescan] alerts suppressed (RESCAN_INITIAL_SILENT=1)")
         return
 
-    # Backfill-only result (no status changes): one summary line, never per-order
-    # spam — a big catch-up can insert hundreds of cards at once.
-    if not transitions:
-        send_telegram(f"🩹 <b>{label}: добавлено {len(inserted)} пропущенных заказов</b>")
-        return
-
-    # Digest: chunk transitions through _chunk_messages so a long window of
-    # cancellations can't blast individual messages and trip Telegram 429.
-    parts = []
+    # Status transitions fold into the hourly digest (run_hourly_summary_cycle),
+    # not a realtime message. Backfill inserts stay a realtime op-health line —
+    # they're rare (only after a stall/outage) and signal that self-recovery
+    # fired, so keeping them visible is worth one terse message.
     for _key, old, new, card in transitions:
-        product = (card.get("product") or "")[:80]
-        parts.append(
-            f"{STATUS_EMOJI.get(new, '?')} <b>{old} → {new}</b>\n"
-            f"{product}\n"
-            f"Артикул: <code>{card.get('article', '?')}</code> | "
-            f"{card.get('price', '?')} | {card.get('arrival_city', '?')}"
-        )
-    backfill_note = f", добавлено {len(inserted)}" if inserted else ""
-    header = f"🔄 <b>Смена статусов ({label}, {len(transitions)}{backfill_note})</b>\n\n———\n\n"
-    chunks = _chunk_messages(parts)
-    MAX_CHUNKS = 3
-    if len(chunks) > MAX_CHUNKS:
-        dropped = len(chunks) - MAX_CHUNKS
-        chunks = chunks[:MAX_CHUNKS]
-        chunks[-1] += f"\n\n… и ещё ~{dropped} блок(ов) переходов"
-    chunks[0] = header + chunks[0]
-    total = len(chunks)
-    for i, chunk in enumerate(chunks, 1):
-        if total > 1:
-            chunk = f"<i>(part {i}/{total})</i>\n" + chunk
-        send_telegram(chunk)
+        _record_transition(old, new, card)
+
+    if inserted:
+        send_telegram(f"🩹 <b>{label}: добавлено {len(inserted)} пропущенных заказов</b>")
 
 
 _sheets_export_fail_streak = 0
@@ -1171,6 +1200,119 @@ def run_sheets_export_cycle(d, state):
         if _sheets_export_fail_streak:
             print(f"  sheets export recovered (was {_sheets_export_fail_streak} failures)")
         _sheets_export_fail_streak = 0
+
+
+def _build_summary_png(counts, labels, title):
+    """Render the hourly-orders bar chart to PNG bytes (Agg backend, headless).
+
+    Returns PNG bytes, or None on any failure so the caller falls back to a
+    text-only digest. Imports matplotlib lazily so a rendering/backend problem
+    can never break monitor startup."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io
+
+        fig, ax = plt.subplots(figsize=(6, 3), dpi=130)
+        ax.bar(range(len(counts)), counts, color="#4f8cff", width=0.7)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels)
+        ax.set_title(title)
+        ax.set_ylabel("Заказы")
+        ax.margins(y=0.18)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        for i, v in enumerate(counts):
+            if v:
+                ax.text(i, v, str(v), ha="center", va="bottom", fontsize=9)
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"  [summary] PNG render failed: {e}")
+        return None
+
+
+def run_hourly_summary_cycle(d, state):
+    """Post the hourly order digest (replaces the per-order Telegram stream).
+
+    One message per hour with: orders in the last 60 min broken down by status,
+    status changes accumulated since the last digest, today's running total, and
+    a PNG bar chart of the last SUMMARY_GRAPH_HOURS clock-hours. Does NOT touch
+    the device (DB-only, like the sheets export). Stays silent on a fully quiet
+    hour so nights don't generate noise — liveness is a separate concern.
+    """
+    global _digest_transitions
+    now = datetime.now()
+    graph_hours = max(1, SUMMARY_GRAPH_HOURS)
+
+    # Graph window: graph_hours clock-buckets ending with the current (partial)
+    # hour. Bucketed by date_parsed (true order time) so late-detected orders
+    # land in their real hour on the next digest.
+    cur_hour_start = now.replace(minute=0, second=0, microsecond=0)
+    window_start = cur_hour_start - timedelta(hours=graph_hours - 1)
+    rows = get_live_orders_in_range(window_start.isoformat(), now.isoformat())
+
+    counts = [0] * graph_hours
+    labels = [(window_start + timedelta(hours=i)).strftime("%H:00")
+              for i in range(graph_hours)]
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(r["date_parsed"])
+        except (ValueError, TypeError):
+            continue
+        idx = int((dt - window_start).total_seconds() // 3600)
+        if 0 <= idx < graph_hours:
+            counts[idx] += 1
+
+    # Headline = rolling last 60 minutes (unambiguous "за последний час",
+    # independent of where the hourly tick lands relative to the clock).
+    hour_ago = now - timedelta(hours=1)
+    last_hour = []
+    for r in rows:
+        try:
+            if datetime.fromisoformat(r["date_parsed"]) >= hour_ago:
+                last_hour.append(r)
+        except (ValueError, TypeError):
+            continue
+
+    # Drain status transitions accumulated since the last digest.
+    transitions = _digest_transitions
+    _digest_transitions = []
+
+    if not last_hour and not transitions:
+        print("  [summary] no orders or transitions this hour — skipping digest")
+        return
+
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_total = count_live_orders_in_range(today_start.isoformat(), now.isoformat())
+
+    lines = [f"📊 <b>Заказы за час</b> ({hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')})"]
+    if last_hour:
+        by_status = Counter(r["status"] for r in last_hour)
+        brk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_status.most_common())
+        lines.append(f"🆕 {len(last_hour)} новых: {brk}")
+    else:
+        lines.append("🆕 0 новых за час")
+    if transitions:
+        by_new = Counter(t["new"] for t in transitions)
+        tbrk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_new.most_common())
+        lines.append(f"🔄 Смены статусов: {len(transitions)} ({tbrk})")
+    lines.append(f"📦 Сегодня всего: {today_total}")
+    if last_hour:
+        top = Counter(r["article"] for r in last_hour).most_common(3)
+        lines.append("🔝 " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
+    caption = "\n".join(lines)[:1024]
+
+    title = f"Заказы по часам (за {graph_hours}ч: {sum(counts)})"
+    png = _build_summary_png(counts, labels, title)
+    if png:
+        send_telegram_photo(png, caption)
+    else:
+        send_telegram(caption)
 
 
 def run_shallow_rescan_cycle(d, state):
@@ -1253,11 +1395,12 @@ def _pick_due_job(jobs, now):
 def orchestrator_loop(d, state):
     """Single-thread, single-device job runner.
 
-    Three jobs share one ADB session: monitor (180s), rescan_shallow (1h, 24h
-    lookback), rescan_deep (24h, 72h lookback). By construction the jobs never
-    overlap on the device — while a rescan runs (~30s–3min), monitor is simply
-    not started. As soon as the rescan returns, the orchestrator picks the
-    next due job, which is normally monitor.
+    Device jobs share one ADB session and never overlap by construction:
+    monitor (180s), rescan_shallow (1h, 24h lookback), rescan_deep (24h, 72h
+    lookback). While a rescan runs (~30s–3min) monitor is simply not started;
+    as soon as it returns the orchestrator picks the next due job, normally
+    monitor. Two DB-only jobs (sheets_export 15m, hourly_summary 1h) don't
+    touch the device — they run in the same loop but need no renavigate after.
 
     Snapshots and restores _last_collect_reason around rescans so the
     monitor's cold-restart escalation (no_container counter) doesn't trip on
@@ -1301,10 +1444,11 @@ def orchestrator_loop(d, state):
 # Declaration order is the tiebreak when multiple jobs are due simultaneously.
 # Monitor first so steady-state new-order detection always wins ties.
 JOBS = [
-    Job("monitor",        REFRESH_INTERVAL,            fn=None),
-    Job("rescan_shallow", SHALLOW_RESCAN_INTERVAL_SEC, fn=None),
-    Job("rescan_deep",    DEEP_RESCAN_INTERVAL_SEC,    fn=None),
-    Job("sheets_export",  SHEETS_EXPORT_INTERVAL_SEC,  fn=None),
+    Job("monitor",         REFRESH_INTERVAL,            fn=None),
+    Job("rescan_shallow",  SHALLOW_RESCAN_INTERVAL_SEC, fn=None),
+    Job("rescan_deep",     DEEP_RESCAN_INTERVAL_SEC,    fn=None),
+    Job("sheets_export",   SHEETS_EXPORT_INTERVAL_SEC,  fn=None),
+    Job("hourly_summary",  HOURLY_SUMMARY_INTERVAL_SEC, fn=None),
 ]
 
 
@@ -1399,20 +1543,13 @@ def run_monitor_cycle(d, state):
         else:
             _consecutive_no_container = 0
 
-    # Apply inline status transitions: top-of-feed only, fire one alert each.
-    # Rare in steady state (≤2 per cycle), so individual messages are fine —
-    # bulk transitions go through the rescan digest path instead.
+    # Apply inline status transitions: top-of-feed only. No realtime alert —
+    # transitions are folded into the hourly digest (run_hourly_summary_cycle).
     for key, (old, new, card) in status_updates.items():
         if update_order_status(key, new):
             state["known_orders"][key] = new
             if new in TERMINAL_STATUSES:
-                product = (card.get("product") or "")[:80]
-                send_telegram(
-                    f"{STATUS_EMOJI[new]} <b>Смена статуса:</b> {old} → {new}\n"
-                    f"{product}\n"
-                    f"Артикул: <code>{card.get('article', '?')}</code> | "
-                    f"{card.get('price', '?')} | {card.get('arrival_city', '?')}"
-                )
+                _record_transition(old, new, card)
 
     # Save new orders to DB (oldest first)
     saved_orders = []
@@ -1425,24 +1562,12 @@ def run_monitor_cycle(d, state):
 
     if new_orders:
         print(f"\n  *** {len(new_orders)} NEW ORDER(S) ***")
-        parts = []
         for o in new_orders:
             print(f"  + [{o.get('status', '?')}] {o.get('product', '?')}")
-            parts.append(format_order_message(o))
-        header = f"🆕 <b>{len(new_orders)} new order(s)</b>\n\n———\n\n"
-        chunks = _chunk_messages(parts)
-        MAX_CHUNKS = 3
-        if len(chunks) > MAX_CHUNKS:
-            dropped = len(chunks) - MAX_CHUNKS
-            chunks = chunks[:MAX_CHUNKS]
-            chunks[-1] += f"\n\n… и ещё ~{dropped} блок(ов) заказов, см. /orders"
-        chunks[0] = header + chunks[0]
-        total = len(chunks)
-        for i, chunk in enumerate(chunks, 1):
-            if total > 1:
-                chunk = f"<i>(part {i}/{total})</i>\n" + chunk
-            send_telegram(chunk)
-        # Trigger bidberry cabinet report for realtime summary update
+        # New orders are no longer streamed to Telegram — they're rolled into the
+        # hourly digest (run_hourly_summary_cycle), derived from the DB by order
+        # time. The realtime bidberry trigger stays so the cabinet report / CPO
+        # view updates without waiting for the hourly tick.
         trigger_bidberry_report()
     else:
         print("  No new orders")
@@ -1458,6 +1583,7 @@ JOBS[0].fn = run_monitor_cycle
 JOBS[1].fn = run_shallow_rescan_cycle
 JOBS[2].fn = run_deep_rescan_cycle
 JOBS[3].fn = run_sheets_export_cycle
+JOBS[4].fn = run_hourly_summary_cycle
 
 
 def main():

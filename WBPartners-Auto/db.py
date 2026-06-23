@@ -397,6 +397,46 @@ def get_live_keys_in_range(start_iso, end_iso):
         conn.close()
 
 
+def get_live_orders_in_range(start_iso, end_iso):
+    """Live (non-stale) orders with date_parsed in [start_iso, end_iso).
+
+    Returns list of dicts (date_parsed, status, article, product, price_cents),
+    ordered by order time. Backs the hourly summary's 6-hour graph and
+    last-hour breakdown — bucketed by date_parsed (true order time), which
+    self-heals detection lag: a late-seen order lands in its real hour on the
+    next digest.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT date_parsed, status, article, product, price_cents "
+            "FROM orders "
+            "WHERE is_stale = 0 AND date_parsed >= ? AND date_parsed < ? "
+            "ORDER BY date_parsed ASC",
+            (start_iso, end_iso),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def count_live_orders_in_range(start_iso, end_iso):
+    """Count live (non-stale) orders with date_parsed in [start_iso, end_iso).
+
+    Cheaper than get_live_orders_in_range when only the total is needed
+    (e.g. the hourly summary's running 'today' figure)."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM orders "
+            "WHERE is_stale = 0 AND date_parsed >= ? AND date_parsed < ?",
+            (start_iso, end_iso),
+        ).fetchone()
+        return row["n"] if row else 0
+    finally:
+        conn.close()
+
+
 def get_recent_orders(limit=5):
     conn = get_connection()
     try:
