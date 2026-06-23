@@ -88,13 +88,16 @@ per-order new-order stream and the per-transition status alerts are GONE.
 New orders and status changes are no longer sent in realtime — they are
 rolled into one **hourly digest** (`run_hourly_summary_cycle`): last-60-min
 orders by status, status changes since the last digest, today's running
-total, top articles, and a **PNG line chart of CPO (₽) per hour** over the
-last `SUMMARY_CPO_HOURS` (12) hours via `sendPhoto` (matplotlib/Agg, falls
-back to text on render failure). The CPO series is fetched from Bidberry
+total, top articles, AND a **12h aggregate** (orders / budget / CPO) — the
+text merges last-hour detail with the 12h totals. The chart is a **PNG CPO
+graph** (orders bars + CPO line + Σ totals) over the last `SUMMARY_CPO_HOURS`
+(12) hours via `sendPhoto`. The CPO series is fetched from Bidberry
 (`GET /api/trigger/cpo-hourly/:cabinetId?hours=12`, `X-Trigger-Secret`) via
 `fetch_cpo_hourly()` — the phone DB has only orders, Bidberry has ad spend,
-so CPO = spend/orders can only be computed there. A fully quiet hour sends
-nothing. **Only error/recovery alerts and
+so CPO = spend/orders can only be computed there. **The chart is rendered by
+`cpo_chart.render_cpo_chart` — the SAME renderer the `/cpo` bot command uses,
+fed the SAME series — so the digest picture and `/cpo` can never diverge.** A
+fully quiet hour sends nothing; falls back to text if render fails. **Only error/recovery alerts and
 the rare `🩹 backfill-added` self-recovery line remain realtime.** New orders
 are derived from the DB by order time (`date_parsed`); status changes are
 accumulated in the in-memory `_digest_transitions` list (lost on restart —

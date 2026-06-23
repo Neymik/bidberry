@@ -26,6 +26,7 @@ from db import (
 from bot import run_bot_thread
 from api import run_api_thread
 from ui import detect_app_version, version_tuple
+from cpo_chart import render_cpo_chart
 
 load_dotenv()
 
@@ -1227,69 +1228,22 @@ def run_sheets_export_cycle(d, state):
         _sheets_export_fail_streak = 0
 
 
-def _build_cpo_png(labels, cpos, title, ref_cpo=None):
-    """Render the hourly-CPO line chart to PNG bytes (Agg backend, headless).
-
-    `cpos` may contain None for hours with no orders — those become gaps in the
-    line. `ref_cpo` (the period's blended CPO) is drawn as a dashed reference.
-    Returns PNG bytes, or None on any failure so the caller falls back to a
-    text-only digest. Imports matplotlib lazily so a rendering/backend problem
-    can never break monitor startup."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import io
-
-        xs = list(range(len(labels)))
-        ys = [float(c) if c is not None else float("nan") for c in cpos]
-        fig, ax = plt.subplots(figsize=(6.5, 3), dpi=130)
-        ax.plot(xs, ys, color="#4f8cff", marker="o", markersize=4, linewidth=2)
-        if ref_cpo:
-            ax.axhline(ref_cpo, color="#ff7043", linestyle="--", linewidth=1,
-                       label=f"среднее {int(round(ref_cpo))} ₽")
-            ax.legend(loc="upper left", fontsize=8, frameon=False)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        ax.set_title(title)
-        ax.set_ylabel("CPO, ₽")
-        ax.margins(y=0.18)
-        ax.grid(axis="y", alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        # Annotate the most recent hour that has a CPO value.
-        for i in reversed(xs):
-            if i < len(cpos) and cpos[i] is not None:
-                ax.annotate(f"{int(round(cpos[i]))}", (i, cpos[i]),
-                            textcoords="offset points", xytext=(0, 6),
-                            ha="center", fontsize=8)
-                break
-        fig.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png")
-        plt.close(fig)
-        return buf.getvalue()
-    except Exception as e:
-        print(f"  [summary] CPO PNG render failed: {e}")
-        return None
-
-
 def run_hourly_summary_cycle(d, state):
     """Post the hourly digest (replaces the per-order Telegram stream).
 
-    Text: orders in the last 60 min by status, status changes accumulated since
-    the last digest, today's running total, and top articles. Chart: a PNG line
-    chart of CPO (₽) per hour over the last SUMMARY_CPO_HOURS hours, fetched from
-    Bidberry (which has ad spend — the phone DB has only orders). Does NOT touch
-    the device (DB-only, like the sheets export). Stays silent on a fully quiet
-    hour so nights don't generate noise — liveness is a separate concern.
+    Text MERGES last-60-min detail (orders by status, status changes since the
+    last digest, top articles) with the 12h aggregate (orders / budget / CPO)
+    and today's running total. Chart = the SAME renderer as the /cpo command
+    (cpo_chart.render_cpo_chart), fed the SAME Bidberry /cpo-hourly series — so
+    the digest picture and /cpo can never diverge. Does NOT touch the device
+    (DB-only). Silent on a fully quiet hour so nights don't generate noise.
     """
     global _digest_transitions
     now = datetime.now()
     hour_ago = now - timedelta(hours=1)
 
-    # Headline = rolling last 60 minutes (unambiguous "за последний час",
-    # independent of where the hourly tick lands relative to the clock).
+    # Last 60 minutes (unambiguous "за последний час", independent of where the
+    # hourly tick lands relative to the clock).
     last_hour = get_live_orders_in_range(hour_ago.isoformat(), now.isoformat())
 
     # Drain status transitions accumulated since the last digest.
@@ -1303,37 +1257,48 @@ def run_hourly_summary_cycle(d, state):
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_total = count_live_orders_in_range(today_start.isoformat(), now.isoformat())
 
-    # CPO chart data from Bidberry (spend lives there, not on the phone).
+    # CPO chart + 12h aggregate from Bidberry (spend lives there, not the phone).
     cpo_hours = max(1, SUMMARY_CPO_HOURS)
     series = fetch_cpo_hourly(cpo_hours)
-    labels, cpos, period_cpo = [], [], None
-    if series and series.get("points"):
-        labels = [p["label"] for p in series["points"]]
-        cpos = [p.get("cpo") for p in series["points"]]
-        period_cpo = (series.get("totals") or {}).get("cpo")
+    totals = (series or {}).get("totals") or {}
+    has_chart = bool(series and series.get("points")
+                     and any(p.get("orders") or p.get("spend") for p in series["points"]))
 
-    lines = [f"📊 <b>Заказы за час</b> ({hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')})"]
+    # --- Text: last-hour detail ---
+    window = f"{hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')}"
+    lines = ["📊 <b>Заказы — дайджест</b>"]
     if last_hour:
         by_status = Counter(r["status"] for r in last_hour)
         brk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_status.most_common())
-        lines.append(f"🆕 {len(last_hour)} новых: {brk}")
+        lines.append(f"🕐 За час ({window}): {len(last_hour)} новых {brk}")
     else:
-        lines.append("🆕 0 новых за час")
+        lines.append(f"🕐 За час ({window}): 0 новых")
     if transitions:
         by_new = Counter(t["new"] for t in transitions)
         tbrk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_new.most_common())
         lines.append(f"🔄 Смены статусов: {len(transitions)} ({tbrk})")
-    lines.append(f"📦 Сегодня всего: {today_total}")
-    if period_cpo is not None:
-        lines.append(f"💸 CPO {cpo_hours}ч: {period_cpo} ₽")
     if last_hour:
         top = Counter(r["article"] for r in last_hour).most_common(3)
-        lines.append("🔝 " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
+        lines.append("🔝 за час: " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
+
+    # --- Text: 12h aggregate (same numbers as the chart subtitle) + today ---
+    if series:
+        t_cpo = totals.get("cpo")
+        t_cpo_str = f"{t_cpo} ₽" if t_cpo is not None else "—"
+        lines.append(
+            f"📈 За {cpo_hours}ч: заказы {totals.get('orders', 0)} · "
+            f"бюджет {round(totals.get('spend', 0) or 0)} ₽ · CPO {t_cpo_str}"
+        )
+    lines.append(f"📦 Сегодня всего: {today_total}")
     caption = "\n".join(lines)[:1024]
 
+    # --- Chart: shared renderer (identical to /cpo) ---
     png = None
-    if labels and any(c is not None for c in cpos):
-        png = _build_cpo_png(labels, cpos, f"CPO по часам (за {cpo_hours}ч)", ref_cpo=period_cpo)
+    if has_chart:
+        try:
+            png = render_cpo_chart(series).getvalue()
+        except Exception as e:
+            print(f"  [summary] CPO chart render failed: {e}")
     if png:
         send_telegram_photo(png, caption)
     else:
