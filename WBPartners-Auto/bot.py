@@ -13,7 +13,7 @@ from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from db import get_recent_orders, get_orders_by_status, get_orders_by_date_range, get_stats
-from cpo_chart import render_cpo_chart
+from cpo_chart import render_cpo_chart, build_cpo_caption
 
 load_dotenv()
 
@@ -434,13 +434,10 @@ async def cpo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось построить график.")
         return
 
-    totals = payload.get("totals", {})
-    tcpo = totals.get("cpo")
-    tcpo_str = f"{tcpo}" if tcpo is not None else "—"
-    caption = (
-        f"\U0001f4c8 CPO по часам за {hours} ч (МСК)\n"
-        f"Заказы: {totals.get('orders', 0)} · Бюджет: {round(totals.get('spend', 0))} ₽ · CPO: {tcpo_str} ₽"
-    )
+    # Same caption builder as the hourly digest, so the two never diverge.
+    # transitions=None: the bot is a separate process and has no access to the
+    # monitor's in-memory status-change list, so that line is omitted here.
+    caption = build_cpo_caption(payload, hours=hours)
     await update.message.reply_photo(photo=buf, caption=caption)
 
 

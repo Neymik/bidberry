@@ -1,12 +1,70 @@
-"""Shared hourly-CPO chart rendering.
+"""Shared hourly-CPO presentation (chart + caption).
 
-ONE renderer for both the `/cpo` bot command (bot.py) and the hourly digest
-(wb_order_monitor.py), so the two pictures never diverge. Both feed it the same
-Bidberry `/api/trigger/cpo-hourly` JSON (points / totals / cabinetName), which
-guarantees identical data on the image — no per-renderer drift.
+ONE renderer AND one caption builder for both the `/cpo` bot command (bot.py)
+and the hourly digest (wb_order_monitor.py), so the two never diverge — same
+picture, same text. Both feed `render_cpo_chart` / `build_cpo_caption` the same
+Bidberry `/api/trigger/cpo-hourly` JSON (points / totals / cabinetName).
 """
 
 import io
+
+# Mirrors the maps in bot.py / wb_order_monitor.py so the shared caption uses
+# the same glyphs everywhere.
+STATUS_EMOJI = {"Заказ": "✅", "Отказ": "❌", "Выкуп": "💰", "Возврат": "↩️"}
+
+
+def build_cpo_caption(series, last_hour=None, today_total=None,
+                      transitions=None, hours=12):
+    """Build the merged CPO digest caption — identical text for the hourly
+    digest and the /cpo command.
+
+    Combines last-60-min order detail (count by status + top articles) with the
+    Nh aggregate (orders / budget / CPO, from `series.totals`) and today's
+    running total. Pulls last-hour + today from the phone DB itself unless the
+    caller passes them in (the digest already has `last_hour`, so it avoids a
+    re-query). `transitions` is the monitor's in-memory status-change list —
+    the bot has no access to it and passes None, so that line is simply omitted.
+    Returns an HTML string clamped to Telegram's 1024-char caption limit.
+    """
+    from datetime import datetime, timedelta
+    from collections import Counter
+    import db
+
+    now = datetime.now()
+    hour_ago = now - timedelta(hours=1)
+    if last_hour is None:
+        last_hour = db.get_live_orders_in_range(hour_ago.isoformat(), now.isoformat())
+    if today_total is None:
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_total = db.count_live_orders_in_range(today_start.isoformat(), now.isoformat())
+
+    totals = (series or {}).get("totals") or {}
+    window = f"{hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')}"
+
+    lines = ["📊 <b>Заказы — дайджест</b>"]
+    if last_hour:
+        by_status = Counter(r["status"] for r in last_hour)
+        brk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_status.most_common())
+        lines.append(f"🕐 За час ({window}): {len(last_hour)} новых {brk}")
+    else:
+        lines.append(f"🕐 За час ({window}): 0 новых")
+    if transitions:
+        by_new = Counter(t["new"] for t in transitions)
+        tbrk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_new.most_common())
+        lines.append(f"🔄 Смены статусов: {len(transitions)} ({tbrk})")
+    if last_hour:
+        top = Counter(r["article"] for r in last_hour).most_common(3)
+        lines.append("🔝 за час: " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
+
+    if series:
+        t_cpo = totals.get("cpo")
+        t_cpo_str = f"{t_cpo} ₽" if t_cpo is not None else "—"
+        lines.append(
+            f"📈 За {hours}ч: заказы {totals.get('orders', 0)} · "
+            f"бюджет {round(totals.get('spend', 0) or 0)} ₽ · CPO {t_cpo_str}"
+        )
+    lines.append(f"📦 Сегодня всего: {today_total}")
+    return "\n".join(lines)[:1024]
 
 
 def render_cpo_chart(data):

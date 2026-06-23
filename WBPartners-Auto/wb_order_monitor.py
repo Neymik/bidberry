@@ -9,7 +9,6 @@ import time
 import os
 import subprocess
 import requests
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
@@ -21,12 +20,12 @@ from db import (
     enqueue_pending_telegram, list_pending_telegram,
     delete_pending_telegram, bump_pending_telegram_attempts,
     get_key_status_map, update_order_status, TERMINAL_STATUSES,
-    get_latest_order_dt, get_live_orders_in_range, count_live_orders_in_range,
+    get_latest_order_dt, get_live_orders_in_range,
 )
 from bot import run_bot_thread
 from api import run_api_thread
 from ui import detect_app_version, version_tuple
-from cpo_chart import render_cpo_chart
+from cpo_chart import render_cpo_chart, build_cpo_caption
 
 load_dotenv()
 
@@ -1254,45 +1253,17 @@ def run_hourly_summary_cycle(d, state):
         print("  [summary] no orders or transitions this hour — skipping digest")
         return
 
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_total = count_live_orders_in_range(today_start.isoformat(), now.isoformat())
-
     # CPO chart + 12h aggregate from Bidberry (spend lives there, not the phone).
     cpo_hours = max(1, SUMMARY_CPO_HOURS)
     series = fetch_cpo_hourly(cpo_hours)
-    totals = (series or {}).get("totals") or {}
     has_chart = bool(series and series.get("points")
                      and any(p.get("orders") or p.get("spend") for p in series["points"]))
 
-    # --- Text: last-hour detail ---
-    window = f"{hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')}"
-    lines = ["📊 <b>Заказы — дайджест</b>"]
-    if last_hour:
-        by_status = Counter(r["status"] for r in last_hour)
-        brk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_status.most_common())
-        lines.append(f"🕐 За час ({window}): {len(last_hour)} новых {brk}")
-    else:
-        lines.append(f"🕐 За час ({window}): 0 новых")
-    if transitions:
-        by_new = Counter(t["new"] for t in transitions)
-        tbrk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_new.most_common())
-        lines.append(f"🔄 Смены статусов: {len(transitions)} ({tbrk})")
-    if last_hour:
-        top = Counter(r["article"] for r in last_hour).most_common(3)
-        lines.append("🔝 за час: " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
-
-    # --- Text: 12h aggregate (same numbers as the chart subtitle) + today ---
-    if series:
-        t_cpo = totals.get("cpo")
-        t_cpo_str = f"{t_cpo} ₽" if t_cpo is not None else "—"
-        lines.append(
-            f"📈 За {cpo_hours}ч: заказы {totals.get('orders', 0)} · "
-            f"бюджет {round(totals.get('spend', 0) or 0)} ₽ · CPO {t_cpo_str}"
-        )
-    lines.append(f"📦 Сегодня всего: {today_total}")
-    caption = "\n".join(lines)[:1024]
-
-    # --- Chart: shared renderer (identical to /cpo) ---
+    # Text + chart both come from the SHARED builders (cpo_chart), identical to
+    # /cpo. Pass the already-queried last_hour (avoids a re-query) and the
+    # drained transitions (monitor-only).
+    caption = build_cpo_caption(series, last_hour=last_hour,
+                                transitions=transitions, hours=cpo_hours)
     png = None
     if has_chart:
         try:
