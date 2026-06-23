@@ -56,7 +56,10 @@ SHEETS_EXPORT_INTERVAL_SEC  = int(os.getenv("SHEETS_EXPORT_INTERVAL_SEC", "900")
 # changes are no longer sent in realtime (errors still are) — they're rolled up
 # once an hour into one message with a PNG bar chart of the last N hours.
 HOURLY_SUMMARY_INTERVAL_SEC = int(os.getenv("HOURLY_SUMMARY_INTERVAL_SEC", "3600"))
-SUMMARY_GRAPH_HOURS         = int(os.getenv("SUMMARY_GRAPH_HOURS", "6"))
+# Hourly digest chart = CPO (₽) per hour over the last N hours, fetched from
+# Bidberry (which has ad spend; the phone DB only has orders, so CPO can't be
+# computed here). 12h by default.
+SUMMARY_CPO_HOURS           = int(os.getenv("SUMMARY_CPO_HOURS", "12"))
 SHALLOW_RESCAN_LOOKBACK_HOURS = 24
 DEEP_RESCAN_LOOKBACK_HOURS    = 72
 RESCAN_MAX_SCROLLS = 200
@@ -158,6 +161,28 @@ def trigger_bidberry_report():
         requests.post(url, timeout=3)
     except Exception as e:
         print(f"  bidberry trigger failed: {e}")
+
+
+def fetch_cpo_hourly(hours=12):
+    """Fetch the last `hours` of hourly CPO (₽) from Bidberry for the digest
+    chart. Bidberry owns ad spend; the phone DB has only orders, so CPO can't be
+    computed here. Returns the parsed series dict (CpoHourlySeries), or None on
+    any failure — the digest then falls back to a text-only message."""
+    cabinet_id = os.getenv("BIDBERRY_CABINET_ID")
+    secret = os.getenv("TRIGGER_SECRET")
+    if not cabinet_id or not secret:
+        return None
+    base = os.getenv("BIDBERRY_URL", "http://127.0.0.1:3000")
+    url = f"{base}/api/trigger/cpo-hourly/{cabinet_id}?hours={hours}"
+    try:
+        resp = requests.get(url, headers={"X-Trigger-Secret": secret}, timeout=8)
+        if not resp.ok:
+            print(f"  [summary] cpo-hourly fetch failed: HTTP {resp.status_code}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"  [summary] cpo-hourly fetch error: {e}")
+        return None
 
 
 def _send_telegram_once(text):
@@ -1202,9 +1227,11 @@ def run_sheets_export_cycle(d, state):
         _sheets_export_fail_streak = 0
 
 
-def _build_summary_png(counts, labels, title):
-    """Render the hourly-orders bar chart to PNG bytes (Agg backend, headless).
+def _build_cpo_png(labels, cpos, title, ref_cpo=None):
+    """Render the hourly-CPO line chart to PNG bytes (Agg backend, headless).
 
+    `cpos` may contain None for hours with no orders — those become gaps in the
+    line. `ref_cpo` (the period's blended CPO) is drawn as a dashed reference.
     Returns PNG bytes, or None on any failure so the caller falls back to a
     text-only digest. Imports matplotlib lazily so a rendering/backend problem
     can never break monitor startup."""
@@ -1214,70 +1241,56 @@ def _build_summary_png(counts, labels, title):
         import matplotlib.pyplot as plt
         import io
 
-        fig, ax = plt.subplots(figsize=(6, 3), dpi=130)
-        ax.bar(range(len(counts)), counts, color="#4f8cff", width=0.7)
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels)
+        xs = list(range(len(labels)))
+        ys = [float(c) if c is not None else float("nan") for c in cpos]
+        fig, ax = plt.subplots(figsize=(6.5, 3), dpi=130)
+        ax.plot(xs, ys, color="#4f8cff", marker="o", markersize=4, linewidth=2)
+        if ref_cpo:
+            ax.axhline(ref_cpo, color="#ff7043", linestyle="--", linewidth=1,
+                       label=f"среднее {int(round(ref_cpo))} ₽")
+            ax.legend(loc="upper left", fontsize=8, frameon=False)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax.set_title(title)
-        ax.set_ylabel("Заказы")
+        ax.set_ylabel("CPO, ₽")
         ax.margins(y=0.18)
+        ax.grid(axis="y", alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        for i, v in enumerate(counts):
-            if v:
-                ax.text(i, v, str(v), ha="center", va="bottom", fontsize=9)
+        # Annotate the most recent hour that has a CPO value.
+        for i in reversed(xs):
+            if i < len(cpos) and cpos[i] is not None:
+                ax.annotate(f"{int(round(cpos[i]))}", (i, cpos[i]),
+                            textcoords="offset points", xytext=(0, 6),
+                            ha="center", fontsize=8)
+                break
         fig.tight_layout()
         buf = io.BytesIO()
         fig.savefig(buf, format="png")
         plt.close(fig)
         return buf.getvalue()
     except Exception as e:
-        print(f"  [summary] PNG render failed: {e}")
+        print(f"  [summary] CPO PNG render failed: {e}")
         return None
 
 
 def run_hourly_summary_cycle(d, state):
-    """Post the hourly order digest (replaces the per-order Telegram stream).
+    """Post the hourly digest (replaces the per-order Telegram stream).
 
-    One message per hour with: orders in the last 60 min broken down by status,
-    status changes accumulated since the last digest, today's running total, and
-    a PNG bar chart of the last SUMMARY_GRAPH_HOURS clock-hours. Does NOT touch
+    Text: orders in the last 60 min by status, status changes accumulated since
+    the last digest, today's running total, and top articles. Chart: a PNG line
+    chart of CPO (₽) per hour over the last SUMMARY_CPO_HOURS hours, fetched from
+    Bidberry (which has ad spend — the phone DB has only orders). Does NOT touch
     the device (DB-only, like the sheets export). Stays silent on a fully quiet
     hour so nights don't generate noise — liveness is a separate concern.
     """
     global _digest_transitions
     now = datetime.now()
-    graph_hours = max(1, SUMMARY_GRAPH_HOURS)
-
-    # Graph window: graph_hours clock-buckets ending with the current (partial)
-    # hour. Bucketed by date_parsed (true order time) so late-detected orders
-    # land in their real hour on the next digest.
-    cur_hour_start = now.replace(minute=0, second=0, microsecond=0)
-    window_start = cur_hour_start - timedelta(hours=graph_hours - 1)
-    rows = get_live_orders_in_range(window_start.isoformat(), now.isoformat())
-
-    counts = [0] * graph_hours
-    labels = [(window_start + timedelta(hours=i)).strftime("%H:00")
-              for i in range(graph_hours)]
-    for r in rows:
-        try:
-            dt = datetime.fromisoformat(r["date_parsed"])
-        except (ValueError, TypeError):
-            continue
-        idx = int((dt - window_start).total_seconds() // 3600)
-        if 0 <= idx < graph_hours:
-            counts[idx] += 1
+    hour_ago = now - timedelta(hours=1)
 
     # Headline = rolling last 60 minutes (unambiguous "за последний час",
     # independent of where the hourly tick lands relative to the clock).
-    hour_ago = now - timedelta(hours=1)
-    last_hour = []
-    for r in rows:
-        try:
-            if datetime.fromisoformat(r["date_parsed"]) >= hour_ago:
-                last_hour.append(r)
-        except (ValueError, TypeError):
-            continue
+    last_hour = get_live_orders_in_range(hour_ago.isoformat(), now.isoformat())
 
     # Drain status transitions accumulated since the last digest.
     transitions = _digest_transitions
@@ -1289,6 +1302,15 @@ def run_hourly_summary_cycle(d, state):
 
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_total = count_live_orders_in_range(today_start.isoformat(), now.isoformat())
+
+    # CPO chart data from Bidberry (spend lives there, not on the phone).
+    cpo_hours = max(1, SUMMARY_CPO_HOURS)
+    series = fetch_cpo_hourly(cpo_hours)
+    labels, cpos, period_cpo = [], [], None
+    if series and series.get("points"):
+        labels = [p["label"] for p in series["points"]]
+        cpos = [p.get("cpo") for p in series["points"]]
+        period_cpo = (series.get("totals") or {}).get("cpo")
 
     lines = [f"📊 <b>Заказы за час</b> ({hour_ago.strftime('%H:%M')}–{now.strftime('%H:%M')})"]
     if last_hour:
@@ -1302,13 +1324,16 @@ def run_hourly_summary_cycle(d, state):
         tbrk = " ".join(f"{STATUS_EMOJI.get(s, '❔')}{n}" for s, n in by_new.most_common())
         lines.append(f"🔄 Смены статусов: {len(transitions)} ({tbrk})")
     lines.append(f"📦 Сегодня всего: {today_total}")
+    if period_cpo is not None:
+        lines.append(f"💸 CPO {cpo_hours}ч: {period_cpo} ₽")
     if last_hour:
         top = Counter(r["article"] for r in last_hour).most_common(3)
         lines.append("🔝 " + ", ".join(f"<code>{a}</code>×{n}" for a, n in top))
     caption = "\n".join(lines)[:1024]
 
-    title = f"Заказы по часам (за {graph_hours}ч: {sum(counts)})"
-    png = _build_summary_png(counts, labels, title)
+    png = None
+    if labels and any(c is not None for c in cpos):
+        png = _build_cpo_png(labels, cpos, f"CPO по часам (за {cpo_hours}ч)", ref_cpo=period_cpo)
     if png:
         send_telegram_photo(png, caption)
     else:

@@ -68,7 +68,7 @@ device:
 | `rescan_shallow` | `RESCAN_SHALLOW_INTERVAL_SEC` (3600s default) | Scroll back ~24h: update statuses AND upsert missing orders (`insert_missing=True`) |
 | `rescan_deep` | `RESCAN_DEEP_INTERVAL_SEC` (86400s default) | Same, ~72h lookback (`RESCAN_DEEP_MAX_SCROLLS`=1000 cap) — catches lingering transitions and deeper gaps |
 | `sheets_export` | `SHEETS_EXPORT_INTERVAL_SEC` (900s) | DB-only (no device): push 'Заказы' + 'Сравнение CPO' tabs to the Google Sheet |
-| `hourly_summary` | `HOURLY_SUMMARY_INTERVAL_SEC` (3600s) | DB-only (no device): post the hourly Telegram digest + 6h PNG bar chart |
+| `hourly_summary` | `HOURLY_SUMMARY_INTERVAL_SEC` (3600s) | DB-only (no device): post the hourly Telegram digest + 12h CPO line chart (CPO series fetched from Bidberry) |
 
 Plus a one-shot **startup catch-up** (`run_startup_catchup`) before the loop: on
 every (re)start it scrolls back to the newest order already in the DB minus a
@@ -88,9 +88,13 @@ per-order new-order stream and the per-transition status alerts are GONE.
 New orders and status changes are no longer sent in realtime — they are
 rolled into one **hourly digest** (`run_hourly_summary_cycle`): last-60-min
 orders by status, status changes since the last digest, today's running
-total, top articles, and a **PNG bar chart** of the last `SUMMARY_GRAPH_HOURS`
-(6) hours via `sendPhoto` (matplotlib/Agg, falls back to text on render
-failure). A fully quiet hour sends nothing. **Only error/recovery alerts and
+total, top articles, and a **PNG line chart of CPO (₽) per hour** over the
+last `SUMMARY_CPO_HOURS` (12) hours via `sendPhoto` (matplotlib/Agg, falls
+back to text on render failure). The CPO series is fetched from Bidberry
+(`GET /api/trigger/cpo-hourly/:cabinetId?hours=12`, `X-Trigger-Secret`) via
+`fetch_cpo_hourly()` — the phone DB has only orders, Bidberry has ad spend,
+so CPO = spend/orders can only be computed there. A fully quiet hour sends
+nothing. **Only error/recovery alerts and
 the rare `🩹 backfill-added` self-recovery line remain realtime.** New orders
 are derived from the DB by order time (`date_parsed`); status changes are
 accumulated in the in-memory `_digest_transitions` list (lost on restart —
