@@ -157,7 +157,7 @@ src/
 └── types/index.ts              # All TypeScript interfaces
 
 public/app/
-├── App.tsx                     # React router (9 pages)
+├── App.tsx                     # React router (10 pages)
 ├── hooks/                      # useAuth, useCabinet, useDateRange, useApi, useToast
 └── components/                 # dashboard, campaigns, products, financial, monitoring, admin, emulator, keywords, import-export
 ```
@@ -217,7 +217,8 @@ React 19 SPA with HTML imports via `Bun.serve()`. Don't use Vite.
 - Entry: `public/index.html` imports `public/app/main.tsx`
 - Styling: Tailwind CSS + Chart.js for charts
 - State: Custom hooks (`useAuth`, `useCabinet`, `useDateRange`, `useApi`, `useToast`)
-- Pages: Dashboard, Campaigns, Products, Keywords, Financial, Import/Export, Monitoring, Emulator, Admin
+- Pages: Dashboard, Campaigns, Products, Keywords, Financial, Import/Export, Monitoring, Penalties (Штрафы), Emulator, Admin
+- New SPA route checklist: add to `App.tsx` (import + `<Route>`), `AppSidebar.tsx` (`navItems`), AND `src/index.ts` `Bun.serve({ routes })` — the last one is required or the deep link 401s instead of serving the SPA
 
 ## WBPartners-Auto (Order Monitor)
 

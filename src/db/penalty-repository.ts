@@ -19,6 +19,7 @@
  * is the idempotent bootstrap for existing databases (mirrors the dev_tasks pattern).
  */
 
+import dayjs from 'dayjs';
 import { execute, query } from './connection';
 
 export interface PenaltyRow {
@@ -81,6 +82,102 @@ export async function getExistingGroupKeys(cabinetId: number): Promise<Set<strin
     set.add(groupKey({ saName: r.sa_name, nmId: r.nm_id, bonusTypeName: r.bonus_type_name, supplierOperName: r.supplier_oper_name }));
   }
   return set;
+}
+
+export interface PenaltyGroupSummary {
+  saName: string | null;
+  nmId: number | null;
+  subjectName: string | null;
+  reason: string;
+  kind: 'penalty' | 'dimension';
+  total: number; // ₽ (can be negative — WB issues reversals)
+  count: number; // report lines
+  lastDate: string | null; // YYYY-MM-DD
+}
+
+export interface PenaltySummary {
+  total: number;
+  count: number;
+  penaltyTotal: number;
+  penaltyCount: number;
+  dimensionTotal: number;
+  dimensionCount: number;
+}
+
+/** Aggregate by (product × reason) for a cabinet over [dateFrom, dateTo]. */
+export async function getPenaltyGroups(
+  cabinetId: number,
+  dateFrom: string,
+  dateTo: string
+): Promise<PenaltyGroupSummary[]> {
+  const rows = await query<
+    {
+      sa_name: string | null;
+      nm_id: number | null;
+      subject_name: string | null;
+      bonus_type_name: string | null;
+      supplier_oper_name: string | null;
+      kind: 'penalty' | 'dimension';
+      total: string | number;
+      cnt: number;
+      last_date: string | Date | null;
+    }[]
+  >(
+    `SELECT sa_name, nm_id, subject_name, bonus_type_name, supplier_oper_name, kind,
+            SUM(penalty) AS total, COUNT(*) AS cnt, MAX(rr_dt) AS last_date
+       FROM warehouse_penalties
+      WHERE cabinet_id = ? AND rr_dt >= ? AND rr_dt <= ?
+      GROUP BY sa_name, nm_id, subject_name, bonus_type_name, supplier_oper_name, kind
+      ORDER BY ABS(SUM(penalty)) DESC, cnt DESC`,
+    [cabinetId, dateFrom, dateTo]
+  );
+  return rows.map(r => ({
+    saName: r.sa_name,
+    nmId: r.nm_id != null ? Number(r.nm_id) : null,
+    subjectName: r.subject_name,
+    reason: (r.bonus_type_name || r.supplier_oper_name || '').trim(),
+    kind: r.kind,
+    total: Number(r.total),
+    count: Number(r.cnt),
+    lastDate: r.last_date ? dayjs(r.last_date).format('YYYY-MM-DD') : null,
+  }));
+}
+
+/** Totals split by kind for a cabinet over [dateFrom, dateTo]. */
+export async function getPenaltySummary(
+  cabinetId: number,
+  dateFrom: string,
+  dateTo: string
+): Promise<PenaltySummary> {
+  const rows = await query<{ kind: 'penalty' | 'dimension'; total: string | number; cnt: number }[]>(
+    `SELECT kind, SUM(penalty) AS total, COUNT(*) AS cnt
+       FROM warehouse_penalties
+      WHERE cabinet_id = ? AND rr_dt >= ? AND rr_dt <= ?
+      GROUP BY kind`,
+    [cabinetId, dateFrom, dateTo]
+  );
+  const summary: PenaltySummary = {
+    total: 0,
+    count: 0,
+    penaltyTotal: 0,
+    penaltyCount: 0,
+    dimensionTotal: 0,
+    dimensionCount: 0,
+  };
+  for (const r of rows) {
+    const total = Number(r.total);
+    const cnt = Number(r.cnt);
+    summary.total += total;
+    summary.count += cnt;
+    if (r.kind === 'dimension') {
+      summary.dimensionTotal += total;
+      summary.dimensionCount += cnt;
+    } else {
+      summary.penaltyTotal += total;
+      summary.penaltyCount += cnt;
+    }
+  }
+  return summary;
 }
 
 /**

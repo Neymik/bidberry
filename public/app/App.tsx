@@ -12,6 +12,7 @@ import ImportExportPage from './components/import-export/ImportExportPage';
 import AdminPage from './components/admin/AdminPage';
 import EmuWebPage from './components/admin/EmuWebPage';
 import MonitoringPage from './components/monitoring/MonitoringPage';
+import PenaltiesPage from './components/penalties/PenaltiesPage';
 import EmuPage from './components/emulator/EmuPage';
 import LoginPage from './components/auth/LoginPage';
 import { ToastProvider } from './hooks/useToast';
@@ -58,6 +59,7 @@ function ProtectedApp() {
                   <Route path="/financial" element={<FinancialPage />} />
                   <Route path="/import-export" element={<ImportExportPage />} />
                   <Route path="/monitoring" element={<MonitoringPage />} />
+                  <Route path="/penalties" element={<PenaltiesPage />} />
                   <Route path="/emulator" element={<EmuPage />} />
                   <Route path="/admin" element={<AdminPage />} />
                 </Routes>

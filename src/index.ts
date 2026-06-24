@@ -616,6 +616,7 @@ Bun.serve({
     '/admin/emu-web': index,
     '/emulator': index,
     '/monitoring': index,
+    '/penalties': index,
   },
   fetch: api.fetch,
   development: process.env.NODE_ENV !== 'production',
