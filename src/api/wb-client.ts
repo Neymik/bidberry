@@ -313,6 +313,32 @@ export class WBApiClient {
     );
   }
 
+  /**
+   * Детальный финансовый отчёт о реализации за период (Statistics API —
+   * /api/v5/supplier/reportDetailByPeriod). Единственный источник, где WB
+   * отдаёт штрафы (`penalty`) и причины удержаний (`bonus_type_name`,
+   * включая перемер/изменение габаритов), привязанные к товару (`nm_id`/`sa_name`).
+   *
+   * Это еженедельный отчёт реализации — данные приходят с лагом (до недели),
+   * не realtime. Пагинация курсором по `rrd_id`: передаём последний rrd_id
+   * страницы как `rrdid`, пока WB не вернёт пустой ответ. WB может вернуть
+   * `null` вместо массива — нормализуем в [].
+   * Лимит запросов жёсткий (≈1 req/min) — вызывающий код добавляет задержки.
+   */
+  async getReportDetailByPeriod(
+    dateFrom: string,
+    dateTo: string,
+    rrdid = 0,
+    limit = 100000
+  ): Promise<any[]> {
+    const rows = await this.request<any[] | null>(
+      WB_STATISTICS_BASE,
+      `/api/v5/supplier/reportDetailByPeriod?dateFrom=${encodeURIComponent(dateFrom)}` +
+        `&dateTo=${encodeURIComponent(dateTo)}&rrdid=${rrdid}&limit=${limit}`
+    );
+    return Array.isArray(rows) ? rows : [];
+  }
+
   // === CONTENT API ===
 
   // Получить список товаров

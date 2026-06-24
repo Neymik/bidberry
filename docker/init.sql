@@ -626,3 +626,26 @@ CREATE TABLE IF NOT EXISTS dev_task_events (
   INDEX idx_task (task_id),
   FOREIGN KEY (task_id) REFERENCES dev_tasks(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Warehouse penalties & dimension re-measurements pulled from WB's financial
+-- detail report (reportDetailByPeriod). One row per penalty/габарит line,
+-- deduped by WB rrd_id. Full line-level history for dashboards; alerting is done
+-- at the (product × reason) group level in code (first appearance only).
+-- Mirrors src/db/penalty-repository.ts ensureSchema().
+CREATE TABLE IF NOT EXISTS warehouse_penalties (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  cabinet_id INT NOT NULL,
+  rrd_id BIGINT NOT NULL,
+  nm_id BIGINT,
+  sa_name VARCHAR(255),
+  subject_name VARCHAR(255),
+  bonus_type_name VARCHAR(500),
+  supplier_oper_name VARCHAR(500),
+  penalty DECIMAL(15,2) NOT NULL DEFAULT 0,
+  rr_dt DATE,
+  kind VARCHAR(20) NOT NULL DEFAULT 'penalty',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_cabinet_rrd (cabinet_id, rrd_id),
+  INDEX idx_cabinet_product (cabinet_id, sa_name),
+  INDEX idx_rr_dt (rr_dt)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

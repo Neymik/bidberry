@@ -554,6 +554,13 @@ scheduler.registerTask('cpo-guard', 15 * 60 * 1000, async () => {
   await runCpoGuard();
 });
 
+// Penalty guard: alert when new warehouse penalties / dimension re-measures
+// appear in WB's financial detail report (weekly, lagged — not realtime).
+import { runPenaltyGuard } from './services/penalty-guard';
+scheduler.registerTask('penalty-guard', 6 * 60 * 60 * 1000, async () => {
+  await runPenaltyGuard();
+});
+
 // Emulator health check
 import { healthCheck as emuHealthCheck } from './services/emulator-orchestrator';
 scheduler.registerTask('emulator-health-check', 60_000, async () => {

@@ -188,6 +188,7 @@ All run per-cabinet with error isolation. Defined in `src/index.ts`.
 | financial-sync | 15m | Expenses, payments, budgets |
 | cabinet-report | 15m | Telegram per-product orders/spend/CPO digest |
 | cpo-guard | 15m | Alert-only: Telegram warning when a product's today CPO is out of line (≥3× cabinet blended CPO or > absolute ceiling), active hours only, with breach streak + re-alert cooldown. Env knobs `CPO_GUARD_*`. First milestone of realtime CPO control (later: auto bid-down, auto-pause) |
+| penalty-guard | 6h | Alert-only: warehouse penalties & dimension re-measures (перемер/занижение габаритов) from WB's financial detail report (`reportDetailByPeriod` — the only source). Stores every penalty/габарит line in `warehouse_penalties` (deduped by `rrd_id`); alerts once per (product × reason) group the first time it appears. WEEKLY/lagged source, not realtime; phone can't see these. Env knobs `PENALTY_GUARD_*`. Seed baseline silently before first run to avoid backlog dump |
 | emulator-health-check | 60s | Container health |
 
 ## Monitoring (CPS/CPO Real-Time)
