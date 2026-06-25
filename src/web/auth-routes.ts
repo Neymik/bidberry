@@ -1,8 +1,6 @@
 import { Hono } from 'hono';
-import { timingSafeEqual } from 'crypto';
-import QRCode from 'qrcode';
 import * as authService from '../services/auth-service';
-import * as tgLogin from '../services/tg-login-store';
+import * as oidc from '../services/telegram-oidc';
 import { authMiddleware, adminMiddleware } from './auth-middleware';
 import * as emuRepo from '../db/emulator-repository';
 import * as cabinetsRepo from '../db/cabinets-repository';
@@ -18,120 +16,56 @@ function setSessionCookie(c: any, accessToken: string) {
   );
 }
 
-function constantTimeEq(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-  } catch {
-    return false;
-  }
-}
-
-// Public config (bot name for Telegram widget)
+// Public config (bot name)
 app.get('/api/auth/config', (c) => {
   return c.json({
     telegram_bot_name: process.env.TELEGRAM_BOT_NAME || '',
+    oidc_enabled: oidc.isConfigured(),
   });
 });
 
-// Telegram Login
-app.post('/api/auth/telegram', async (c) => {
+// --- Telegram OpenID Connect login (Authorization Code + PKCE) ---
+// Replaces the old QR/deep-link bot flow. See src/services/telegram-oidc.ts.
+
+// The redirect_uri MUST exactly match a URL registered in @BotFather → Bot
+// Settings → Web Login. Pin it via OAUTH_REDIRECT_BASE; otherwise derive it
+// from the (proxied) request host.
+function redirectBase(c: any): string {
+  const env = process.env.OAUTH_REDIRECT_BASE;
+  if (env) return env.replace(/\/$/, '');
+  const proto = c.req.header('X-Forwarded-Proto') || 'https';
+  const host = c.req.header('X-Forwarded-Host') || c.req.header('Host') || '';
+  return `${proto}://${host}`;
+}
+
+// 1) Browser hits this; we 302 to Telegram's consent screen.
+app.get('/api/auth/telegram/oidc/start', (c) => {
+  if (!oidc.isConfigured()) {
+    return c.json({ error: 'Telegram OIDC is not configured' }, 500);
+  }
+  const redirectUri = `${redirectBase(c)}/api/auth/telegram/oidc/callback`;
+  return c.redirect(oidc.buildAuthUrl(redirectUri), 302);
+});
+
+// 2) Telegram redirects back here with ?code&state. We exchange server-side,
+//    run the whitelist + upsert, set the session cookie, and bounce to the SPA.
+//    On any failure we send the user back to the login screen with a message.
+app.get('/api/auth/telegram/oidc/callback', async (c) => {
+  const err = c.req.query('error');
+  if (err) return c.redirect(`/?login_error=${encodeURIComponent(err)}`, 302);
+
+  const code = c.req.query('code') || '';
+  const state = c.req.query('state') || '';
+  if (!code || !state) return c.redirect('/?login_error=missing_code', 302);
+
   try {
-    const data = await c.req.json();
-    const result = await authService.loginWithTelegram(data);
-
-    // Set access token as httpOnly cookie
-    const maxAge = 24 * 60 * 60; // 1 day
-    c.header('Set-Cookie', `access_token=${result.access_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`);
-
-    return c.json(result);
+    const profile = await oidc.exchangeCode(code, state);
+    const auth = await authService.loginWithTelegramVerified(profile);
+    setSessionCookie(c, auth.access_token);
+    return c.redirect('/', 302);
   } catch (error: any) {
-    const status = error.message.includes('Invalid') || error.message.includes('expired') ? 401 : 500;
-    return c.json({ error: error.message }, status);
+    return c.redirect(`/?login_error=${encodeURIComponent(error.message || 'login_failed')}`, 302);
   }
-});
-
-// --- Telegram deep-link / QR login (no phone, opens the Telegram app) ---
-
-// 1) Browser asks for a login link. We mint a one-time token and return a
-//    t.me deep link + an SVG QR of it. See src/services/tg-login-store.ts.
-app.post('/api/auth/telegram/deeplink', async (c) => {
-  const botName = process.env.TELEGRAM_BOT_NAME || '';
-  if (!botName) return c.json({ error: 'Telegram bot is not configured' }, 500);
-
-  const token = tgLogin.createToken();
-  const url = `https://t.me/${botName}?start=${token}`;
-  const qr = await QRCode.toString(url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
-
-  return c.json({ token, bot: botName, url, qr, expires_in: tgLogin.TTL_SEC });
-});
-
-// 2) The bot calls this (localhost + X-Trigger-Secret) when a user opens the
-//    deep link. We run the whitelist check and attach the issued session to
-//    the token. Trust = shared secret + Telegram-authenticated update.
-app.post('/api/auth/telegram/confirm', async (c) => {
-  const expected = process.env.TRIGGER_SECRET || '';
-  const got = c.req.header('X-Trigger-Secret') || '';
-  if (!expected || expected.length < 16 || !constantTimeEq(got, expected)) {
-    return c.json({ error: 'unauthorized' }, 401);
-  }
-
-  let body: any;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: 'invalid json' }, 400);
-  }
-  const token: string = body?.token || '';
-  const tu = body?.telegram_user;
-  if (!token || !tu || typeof tu.id !== 'number') {
-    return c.json({ error: 'token and telegram_user.id are required' }, 400);
-  }
-
-  const entry = tgLogin.getEntry(token);
-  if (!entry) return c.json({ status: 'expired' });
-  if (entry.status !== 'pending') return c.json({ status: entry.status });
-
-  try {
-    const auth = await authService.loginWithTelegramVerified({
-      id: tu.id,
-      username: tu.username || undefined,
-      first_name: tu.first_name || undefined,
-      last_name: tu.last_name || undefined,
-      photo_url: tu.photo_url || undefined,
-    });
-    tgLogin.markConfirmed(token, auth);
-    return c.json({ status: 'confirmed' });
-  } catch (error: any) {
-    tgLogin.markDenied(token, error.message || 'Access denied');
-    return c.json({ status: 'denied', error: error.message });
-  }
-});
-
-// 3) Browser polls until the token flips to confirmed/denied/expired. On
-//    confirm we set the session cookie and hand back the same payload shape
-//    as the widget login.
-app.get('/api/auth/telegram/check', (c) => {
-  const token = c.req.query('token') || '';
-  const entry = tgLogin.getEntry(token);
-  if (!entry) return c.json({ status: 'expired' });
-  if (entry.status === 'pending') return c.json({ status: 'pending' });
-
-  if (entry.status === 'denied') {
-    tgLogin.consume(token);
-    return c.json({ status: 'denied', error: entry.error });
-  }
-
-  // confirmed
-  const { auth } = entry;
-  tgLogin.consume(token);
-  setSessionCookie(c, auth.access_token);
-  return c.json({
-    status: 'confirmed',
-    access_token: auth.access_token,
-    expires_at: auth.expires_at,
-    user: auth.user,
-  });
 });
 
 // Get current user

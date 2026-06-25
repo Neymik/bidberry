@@ -105,6 +105,7 @@ docker exec wb-analytics-app bun run src/cli/tasks.ts done <id> [who]
 - **Required env vars on `ostapLase` `~/bidberry/.env`** (deploy will fail loud if missing):
   - `JWT_SECRET` — long random string (`openssl rand -hex 32`). Used to sign session JWTs. App refuses to start if this is unset or equal to `change-me-in-production`.
   - `TRIGGER_SECRET` — long random string. Required header `X-Trigger-Secret` on `/api/trigger/*` webhooks. WBPartners-Auto must use the SAME value (see WBPartners-Auto/.env).
+  - `TELEGRAM_OIDC_CLIENT_ID` / `TELEGRAM_OIDC_CLIENT_SECRET` — website login via Telegram OpenID Connect (Authorization Code + PKCE). Obtained from @BotFather → Bot Settings → Web Login, where you must also register the Allowed URL `https://bidberry.animeenigma.ru` and redirect URI `https://bidberry.animeenigma.ru/api/auth/telegram/oidc/callback`. `OAUTH_REDIRECT_BASE` pins the origin used to build that redirect_uri. Login flow: `src/services/telegram-oidc.ts` + `/api/auth/telegram/oidc/{start,callback}`; the `id` claim is the Telegram user id, matched against the existing `allowed_users` whitelist. (Replaced the old QR/deep-link bot login.)
 
 ## Project Structure
 

@@ -34,26 +34,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (token) {
-      fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
+    // Session lives in an httpOnly cookie set by the OIDC callback (also sent
+    // for same-origin requests), with a legacy Bearer token as fallback. Always
+    // ask /me — the cookie may authenticate us even without a localStorage token.
+    fetch('/api/auth/me', {
+      credentials: 'same-origin',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => {
+        if (res.ok) return res.json();
+        throw new Error('Unauthorized');
       })
-        .then((res) => {
-          if (res.ok) return res.json();
-          throw new Error('Unauthorized');
-        })
-        .then((data: User) => {
-          setUser(data);
-        })
-        .catch(() => {
-          setToken(null);
-          setUser(null);
-          localStorage.removeItem('token');
-        })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+      .then((data: User) => {
+        setUser(data);
+        // Drop any ?login_error / OAuth params left in the URL after a redirect.
+        if (window.location.search) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+      })
+      .catch(() => {
+        setToken(null);
+        setUser(null);
+        localStorage.removeItem('token');
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   function login(data: AuthResponse) {
